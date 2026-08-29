@@ -21,6 +21,7 @@ not.
 | `features` | Compile-time set of ancillary-data features; the control buffer is sized as the sum over it. |
 | `pktinfo` / `ecn` | Which local address a datagram arrived on, and its ECN marking. Both families. |
 | `gro` / `segment` | Hardware segmentation offload: many datagrams per slot in, one large buffer out. |
+| `txtime` / `pacer` | Per-datagram departure times via `SO_TXTIME`, and drift-free rate arithmetic. |
 | `result` | `std::expected` over `errno`, with left-to-right pipe combinators. |
 
 ## What makes it different
@@ -104,10 +105,14 @@ for (const auto& piece : d.segments()) { (void)tx->stage(piece, d.from(), reply)
 
 ## Status
 
-Phases 1 to 3 are done and tested: the memory model, the batching syscalls,
-ancillary data (destination address and ECN, both families), and segmentation
-offload (`UDP_GRO` / `UDP_SEGMENT`). Phases 4 and 5, covering `SO_TXTIME` pacing
-and demultiplexing, are in progress.
+Phases 1 to 4 are done and tested: the memory model, the batching syscalls,
+ancillary data (destination address and ECN, both families), segmentation
+offload (`UDP_GRO` / `UDP_SEGMENT`), and transmit pacing (`SO_TXTIME`). Phase 5,
+demultiplexing, is in progress.
+
+Pacing needs `tc qdisc add dev <iface> root fq` on the interface or the kernel
+ignores every departure time without reporting anything; see
+[docs/pacing.md](docs/pacing.md).
 
 ## Docs
 
@@ -115,6 +120,7 @@ and demultiplexing, are in progress.
 - [Batches](docs/batches.md): sizing, carving, receiving, transmitting, and the borrow contract.
 - [Ancillary data](docs/metadata.md): the feature set, destination address, ECN, and writing a feature.
 - [Offload](docs/offload.md): GRO and GSO, slot sizing, and the segmentation view.
+- [Pacing](docs/pacing.md): `SO_TXTIME`, the `fq` precondition, and the rate arithmetic.
 - [Errors](docs/errors.md): `result`, `errc`, and the pipe combinators.
 - [Integration](docs/integration.md): consuming dgram from another CMake project.
 - [Testing](docs/testing.md): the build matrix, what each suite covers, and how the fuzzing works.

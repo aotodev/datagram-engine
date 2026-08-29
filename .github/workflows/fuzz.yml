@@ -1,0 +1,69 @@
+# Time-boxed AFL++ runs for each harness. The toolchain image builds AFL++ from
+# source against its own GCC, so the plugin always matches the compiler.
+name: fuzz
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'fuzz/**'
+      - 'cmake/**'
+      - '**/CMakeLists.txt'
+      - '.github/workflows/fuzz.yml'
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  afl:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/aotodev/datagram-engine-ci:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: [fuzz_cmsg_parse, fuzz_segments]
+    name: ${{ matrix.harness }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=afl-g++-fast \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DDGRAM_SANITIZER=address+undefined \
+            -DDGRAM_HARDENED=ON \
+            -DDGRAM_BUILD_FUZZERS=ON
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Fuzz
+        env:
+          AFL_SKIP_CPUFREQ: 1
+          AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES: 1
+          AFL_NO_UI: 1
+          AFL_BENCH_UNTIL_CRASH: 1
+        run: |
+          afl-fuzz -i fuzz/corpus -o out -V 300 -- "./build/fuzz/${{ matrix.harness }}"
+      - name: Fail on any crash
+        run: |
+          if [ -n "$(ls -A out/default/crashes 2>/dev/null | grep -v README)" ]; then
+            echo "::error::AFL++ saved crashes"
+            for c in out/default/crashes/id*; do
+              echo "--- $c ---"
+              "./build/fuzz/${{ matrix.harness }}" "$c" || true
+            done
+            exit 1
+          fi
+          echo "no crashes"
+      - name: Upload findings
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.harness }}-findings
+          path: out/default/crashes

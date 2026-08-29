@@ -15,7 +15,7 @@ add_library(dgram_compile_checks OBJECT compile_checks.cpp)
 target_link_libraries(dgram_compile_checks PRIVATE dgram dgram_flags)
 set_target_properties(dgram_compile_checks PROPERTIES CXX_STANDARD 26 CXX_MODULE_STD ON CXX_SCAN_FOR_MODULES ON)
 
-add_executable(dgram_tests loopback_tests.cpp metadata_tests.cpp malformed_control_tests.cpp concurrency_tests.cpp offload_tests.cpp)
+add_executable(dgram_tests loopback_tests.cpp metadata_tests.cpp malformed_control_tests.cpp concurrency_tests.cpp offload_tests.cpp pacing_tests.cpp)
 target_link_libraries(dgram_tests PRIVATE dgram dgram_flags GTest::gtest_main)
 find_package(Threads REQUIRED)
 target_link_libraries(dgram_tests PRIVATE Threads::Threads)

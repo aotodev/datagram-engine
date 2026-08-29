@@ -21,6 +21,7 @@ checkout.
 | `metadata_tests.cpp` | Destination address and ECN over loopback, both families, including a feature that was never enabled and an undersized control buffer. |
 | `malformed_control_tests.cpp` | Control buffers the kernel would never write. Every case here was found by the fuzzer first. |
 | `offload_tests.cpp` | GRO and GSO over loopback, and the segmentation walk on its own: short tail, exact multiple, stride of zero, stride past the end, empty payload. |
+| `pacing_tests.cpp` | The rate arithmetic exhaustively (monotonicity, drift, extreme rates, constexpr), plus what the kernel side allows unprivileged. Real pacing needs `fq` and `CAP_NET_ADMIN`, so no test here asserts a datagram was actually delayed. |
 | `concurrency_tests.cpp` | Several workers, each with its own socket, arena and batches, running concurrently. Meaningful only under `-s thread`. |
 
 ## Configurations

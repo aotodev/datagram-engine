@@ -1,0 +1,29 @@
+# Builds and pushes the datagram_engine CI toolchain image to ghcr.io; the test
+# workflows only pull it. No schedule: a rebuild installs whatever Arch ships
+# that day, so toolchain bumps stay deliberate.
+name: ci-image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'ci/Containerfile'
+      - '.github/workflows/ci-image.yml'
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to ghcr.io
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" |
+            docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build and push
+        run: |
+          docker build -f ci/Containerfile -t ghcr.io/aotodev/datagram-engine-ci:latest ci/
+          docker push ghcr.io/aotodev/datagram-engine-ci:latest

@@ -59,6 +59,37 @@ static_assert(dgram::ecn::space >= dgram::detail::space_for(sizeof(std::uint8_t)
 static_assert(dgram::detail::space_for(1) > 1);
 static_assert(dgram::detail::space_for(20) >= dgram::detail::length_for(20));
 
+/* Direction-specific features carry only the members their direction needs. */
+static_assert(dgram::receivable_feature<dgram::gro> && !dgram::sendable_feature<dgram::gro>);
+static_assert(dgram::sendable_feature<dgram::segment> && !dgram::parseable_feature<dgram::segment>);
+static_assert(dgram::sendable_feature<dgram::txtime> && !dgram::parseable_feature<dgram::txtime>);
+
+/* Four distinct cmsg payload widths are now in play, so every control-buffer
+   term is derived from the feature rather than written down. */
+using paced = dgram::features<dgram::txtime, dgram::ecn, dgram::segment>;
+static_assert(paced::control_space == dgram::txtime::space + dgram::ecn::space + dgram::segment::space);
+static_assert(dgram::txtime::space == dgram::detail::space_for(sizeof(std::uint64_t)));
+static_assert(dgram::segment::space == dgram::detail::space_for(sizeof(std::uint16_t)));
+static_assert(dgram::gro::space == dgram::detail::space_for(sizeof(int)));
+/* CMSG_SPACE rounds the payload up to the cmsghdr alignment, so every payload
+   from 1 to 8 bytes costs the same. Worth pinning: it means adding a small
+   feature is often free in buffer terms, and it is not obvious from the name. */
+static_assert(dgram::txtime::space == dgram::segment::space);
+static_assert(dgram::segment::space == dgram::ecn::space);
+static_assert(dgram::detail::space_for(1) == dgram::detail::space_for(8));
+static_assert(dgram::detail::space_for(9) > dgram::detail::space_for(8));
+static_assert(dgram::pktinfo::space > dgram::txtime::space, "a 20-byte payload does cost more");
+
+/* The pacer is usable at compile time. */
+static_assert([] {
+    dgram::pacer p{1'000'000, std::chrono::nanoseconds{0}};
+    (void)p.schedule(1000);
+    return p.peek();
+}() == std::chrono::milliseconds{1});
+
+static_assert(dgram::socket_option<dgram::transmit_time<>>);
+static_assert(dgram::socket_option<dgram::transmit_time<dgram::txtime_clock::tai, true, false>>);
+
 /* ============================================================================
  * Batch geometry
  * ============================================================================ */

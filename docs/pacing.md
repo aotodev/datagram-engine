@@ -1,0 +1,114 @@
+# Pacing
+
+Writing datagrams as fast as the socket accepts them emits micro-bursts, which
+overflow router queues and are read as loss by the congestion controller that
+caused them. Pacing hands the kernel a departure time per datagram instead.
+
+## The precondition, which fails silently
+
+**`SO_TXTIME` does nothing unless the outgoing interface carries the Fair Queue
+discipline.**
+
+```sh
+tc qdisc add dev <iface> root fq
+```
+
+Without it the socket option is accepted, every `SCM_TXTIME` control message is
+accepted, every datagram is sent immediately, and **nothing is reported
+anywhere**: not an error return, not the error queue. Measured, not assumed.
+
+The engine does not detect this. Answering "is pacing actually active" needs a
+netlink qdisc query, which is a hundred lines of `rtattr` parsing for a check
+that fires once at startup, so it is deliberately out of scope. Treat `fq` as
+part of deploying this, the way an MTU is.
+
+## Setting up the socket
+
+```cpp
+auto sock{dgram::socket::open<dgram::transmit_time<>>(dgram::family::inet4)};
+```
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `Clock` | `txtime_clock::monotonic` | Which clock departure times are on. |
+| `Deadline` | `false` | `true` means "no later than" rather than "at", letting the qdisc reorder. |
+| `ReportErrors` | `true` | Route missed and malformed departures to the error queue. |
+
+**`CLOCK_TAI` requires `CAP_NET_ADMIN`** and fails with `EPERM` otherwise, which
+is why `monotonic` is the default. Reach for `tai` when departure times are
+shared between machines, since it does not step.
+
+`dgram::pacing_clock` is `std::chrono::steady_clock`, which is `CLOCK_MONOTONIC`
+on this platform. `now_on(clock)` reads whichever clock the socket was configured
+with.
+
+## Attaching a departure time
+
+`txtime` is a send-only feature, per datagram, so a batch can mix paced and
+unpaced entries:
+
+```cpp
+using tx_features = dgram::features<dgram::txtime, dgram::ecn>;
+
+dgram::control<tx_features> ancillary{};
+ancillary.set<dgram::txtime>(when);
+(void)tx.stage(payload, peer, ancillary);
+```
+
+The control message type and the socket option share a value
+(`SCM_TXTIME == SO_TXTIME == 61`). That is the kernel's own aliasing.
+
+## Computing the departure: `pacer`
+
+```cpp
+dgram::pacer p{bytes_per_second, dgram::now_on(dgram::txtime_clock::monotonic)};
+
+ancillary.set<dgram::txtime>(p.schedule(wire_size));
+```
+
+| Member | Description |
+|--------|-------------|
+| `pacer(rate, start)` | Bytes per second, anchored at a departure time. Rate zero is unpaced. |
+| `departure schedule(bytes)` | The departure for this datagram, advancing the schedule. |
+| `void resume_at(now)` | Re-anchor forward after an idle period. Never rewinds. |
+| `void set_rate(rate)` | Change rate without moving the current departure. |
+| `departure peek()` | The next departure, without consuming it. |
+
+`schedule` charges `bytes` against the rate. Pass the wire size, not just the
+payload, or the pacer runs slightly fast.
+
+**Call `resume_at` after an idle period.** A sender that stops for a second comes
+back with a schedule a second in the past and emits its whole backlog as fast as
+the socket accepts, which is the burst pacing exists to prevent. `resume_at`
+only ever moves the schedule forward.
+
+`pacer` is drift-free: the sub-nanosecond remainder of each division is carried
+into the next datagram rather than truncated. Accumulating rounded intervals is
+the usual way this goes wrong, and it is not a rounding curiosity: at 1500-byte
+datagrams and a rate that does not divide evenly, truncation loses about 70
+microseconds per hundred thousand datagrams and grows without bound.
+
+It is `constexpr`, has no state beyond three integers, and is not thread-safe:
+one pacer per sending thread, like everything else here.
+
+## Errors
+
+With `ReportErrors` on, the kernel reports a departure it could not honour:
+
+```cpp
+if (const auto fault{dgram::drain_transmit_error(sock.native())}; fault && *fault) {
+    switch (**fault) { /* invalid_departure, missed_deadline, other */ }
+}
+```
+
+An empty queue is a success with no value, not an error. This only ever reports
+anything once `fq` is in place; with no queueing discipline there is nothing to
+miss a deadline.
+
+## Not included: a timer wheel
+
+Protocol timeouts, retransmission and loss detection all want an efficient timer
+structure, and pacing is often discussed alongside it. It is deliberately not
+here. Pacing schedules a datagram the engine is already holding; a timer wheel
+schedules a callback against connection state, and there is no connection state
+in the engine until demultiplexing exists. It belongs with that, not with this.
