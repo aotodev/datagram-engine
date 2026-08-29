@@ -1,0 +1,14 @@
+# Relaxes the yamllint rules that clash with the GitHub Actions workflow
+# dialect, while keeping the rest of the default ruleset for ordinary YAML:
+#   - document-start: workflows conventionally omit the leading "---".
+#   - truthy/check-keys: the mandatory `on:` workflow key is not a boolean.
+#   - line-length: workflows carry long ${{ ... }} expressions and inline shell;
+#     120 matches the project's line-length conventions.
+extends: default
+
+rules:
+  document-start: disable
+  truthy:
+    check-keys: false
+  line-length:
+    max: 120

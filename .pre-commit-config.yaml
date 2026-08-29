@@ -1,0 +1,67 @@
+---
+# Pre-commit hooks for datagram_engine.
+#   Install:        pre-commit install
+#   Run manually:   pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-yaml
+      - id: check-shebang-scripts-are-executable
+      - id: mixed-line-ending
+        args: [--fix=lf]
+        files: '(\.(cpp|cppm|h|yml|yaml|md|cmake|sh)|CMakeLists\.txt)$'
+      - id: fix-byte-order-marker
+        files: '(\.(cpp|cppm|h|yml|yaml|md|cmake|sh)|CMakeLists\.txt)$'
+      - id: trailing-whitespace
+        files: '(\.(cpp|cppm|h|yml|yaml|md|cmake|sh)|CMakeLists\.txt)$'
+      - id: end-of-file-fixer
+        files: '(\.(cpp|cppm|h|yml|yaml|md|cmake|sh)|CMakeLists\.txt)$'
+
+  - repo: https://github.com/lucas-c/pre-commit-hooks
+    rev: v1.5.6
+    hooks:
+      - id: remove-tabs
+        name: Tabs to 4 Spaces (Code)
+        args: [--whitespaces-count, '4']
+        files: '(\.(cpp|cppm|h|cmake)|CMakeLists\.txt)$'
+
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v22.1.2
+    hooks:
+      - id: clang-format
+        files: '\.(cpp|cppm|h)$'
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+
+  # cmake-format is deliberately omitted: its layout algorithms don't preserve
+  # the project's hand-formatted multi-line style. cmake-lint catches structural
+  # issues without imposing formatting.
+  - repo: https://github.com/cheshirekow/cmake-format-precommit
+    rev: v0.6.13
+    hooks:
+      - id: cmake-lint
+        additional_dependencies: [pyyaml]
+
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        args:
+          - "-f=colored"
+        exclude: '^\.(clang-format|clang-tidy)$'
+
+  # ASCII-only punctuation: no em dashes, smart quotes, arrows or ellipses.
+  - repo: local
+    hooks:
+      - id: ascii-only
+        name: ASCII punctuation only
+        entry: scripts/check-ascii.sh
+        language: script
+        files: '(\.(cpp|cppm|h|yml|yaml|md|cmake|sh)|CMakeLists\.txt)$'

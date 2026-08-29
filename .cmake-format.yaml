@@ -1,0 +1,31 @@
+---
+# cmake-format configuration for datagram_engine.
+# Matches the project's clang-format settings (4-space indent, 120 columns).
+
+format:
+  line_width: 120
+  tab_size: 4
+  use_tabchars: false
+  separate_ctrl_name_with_space: false
+  separate_fn_name_with_space: false
+  # Keep closing parens on the last argument's line rather than dangling.
+  dangle_parens: false
+  # Don't force-collapse multi-argument calls onto one line when they fit;
+  # match how they were written.
+  max_subgroups_hwrap: 4
+  max_pargs_hwrap: 6
+  enable_sort: false
+  autosort: false
+  command_case: lower
+  keyword_case: unchanged
+
+lint:
+  disabled_codes:
+    # C0103: Function name doesn't match style (we use snake_case helpers,
+    # cmake-lint flags add_arm_executable etc as non-canonical).
+    - C0103
+    # C0111: Missing docstring on function/macro; block-comment headers
+    # immediately above the function declaration are our convention.
+    - C0111
+    # C0301: Line too long, already enforced by line_width above.
+    - C0301
