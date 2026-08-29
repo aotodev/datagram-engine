@@ -10,4 +10,5 @@ export import :cmsg;
 export import :error;
 export import :feature;
 export import :metadata;
+export import :offload;
 export import :socket;

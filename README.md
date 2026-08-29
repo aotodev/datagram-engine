@@ -20,6 +20,7 @@ not.
 | `transmit_batch` | `sendmmsg` argument block. Stages by reference, so echoing costs no copy. |
 | `features` | Compile-time set of ancillary-data features; the control buffer is sized as the sum over it. |
 | `pktinfo` / `ecn` | Which local address a datagram arrived on, and its ECN marking. Both families. |
+| `gro` / `segment` | Hardware segmentation offload: many datagrams per slot in, one large buffer out. |
 | `result` | `std::expected` over `errno`, with left-to-right pipe combinators. |
 
 ## What makes it different
@@ -88,21 +89,32 @@ Every configuration builds and runs the suite: plain, **ASan + UBSan**,
 stack protection. The concurrency suite exists specifically to put the
 shared-nothing threading claim under a race detector.
 
-The ancillary-data parser is fuzzed, since it is the one place attacker-supplied
-bytes meet pointer arithmetic. Everything the fuzzer has found is pinned as a
-unit test. Details in [docs/testing.md](docs/testing.md).
+The ancillary-data parser and the segmentation walk are fuzzed with **AFL++**,
+since those are the places kernel-supplied values drive pointer arithmetic.
+Everything the fuzzers have found is pinned as a unit test. Details in
+[docs/testing.md](docs/testing.md).
+
+**Offload is invisible to the receive loop.** A GRO slot holding several
+datagrams and a slot holding one are iterated the same way, so nothing branches
+on whether the kernel coalesced.
+
+```cpp
+for (const auto& piece : d.segments()) { (void)tx->stage(piece, d.from(), reply); }
+```
 
 ## Status
 
-Phases 1 and 2 are done and tested: the memory model, the batching syscalls, and
-ancillary data (destination address and ECN, both families). Phases 3 to 5,
-covering GRO/GSO, pacing and demultiplexing, are in progress.
+Phases 1 to 3 are done and tested: the memory model, the batching syscalls,
+ancillary data (destination address and ECN, both families), and segmentation
+offload (`UDP_GRO` / `UDP_SEGMENT`). Phases 4 and 5, covering `SO_TXTIME` pacing
+and demultiplexing, are in progress.
 
 ## Docs
 
 - [Sockets](docs/sockets.md): `socket`, `endpoint`, and the option set.
 - [Batches](docs/batches.md): sizing, carving, receiving, transmitting, and the borrow contract.
 - [Ancillary data](docs/metadata.md): the feature set, destination address, ECN, and writing a feature.
+- [Offload](docs/offload.md): GRO and GSO, slot sizing, and the segmentation view.
 - [Errors](docs/errors.md): `result`, `errc`, and the pipe combinators.
 - [Integration](docs/integration.md): consuming dgram from another CMake project.
 - [Testing](docs/testing.md): the build matrix, what each suite covers, and how the fuzzing works.

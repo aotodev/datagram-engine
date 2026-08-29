@@ -18,6 +18,7 @@ import :address;
 import :cmsg;
 import :error;
 import :feature;
+import :offload;
 import :socket;
 
 namespace dgram {
@@ -89,6 +90,28 @@ public:
      * more than once.
      */
     [[nodiscard]] metadata<Features> meta() const noexcept { return detail::parse_control<Features>(raw_->msg_hdr); }
+
+    /**
+     * @brief The datagrams packed into this slot, as a lazy view of spans.
+     *
+     * With `gro` in the feature set and the kernel having coalesced, one slot
+     * holds several datagrams and this splits them; otherwise it yields the
+     * whole payload as one. Either way iterating this is correct, so a receive
+     * loop need not branch on whether offload is in play.
+     *
+     * Parses the control buffer to find the segment size. A caller that already
+     * holds a `meta()` should pass the size to `segments_of` instead of walking
+     * the buffer twice.
+     */
+    [[nodiscard]] auto segments() const noexcept {
+        std::size_t stride{};
+        if constexpr (Features::template contains<gro>) {
+            if (const auto size{meta().template get<gro>()}) {
+                stride = *size;
+            }
+        }
+        return segments_of(payload(), stride);
+    }
 
     /**
      * @brief Payload did not fit the slot and the excess is gone.

@@ -23,29 +23,40 @@ import :error;
 namespace dgram {
 
 /**
- * @brief One kind of control message the engine knows how to handle.
+ * @brief Anything that can occupy space in a control buffer.
  *
  * `space` is the `CMSG_SPACE` contribution, alignment padding included, and for
  * a feature that appears in both families it is the larger of the two: the
  * receive path cannot know which will arrive.
+ *
+ * Deliberately the bare minimum. Not every feature travels in both directions:
+ * `UDP_GRO` is only ever received and `UDP_SEGMENT` only ever sent, so requiring
+ * the full set here would force one of them to carry a member that is never
+ * called. The direction-specific refinements below say which is which, and a
+ * receive and a transmit batch take their own feature sets.
  */
 export template <typename T>
-concept cmsg_feature = requires(const ::cmsghdr* c, int level, int type) {
+concept cmsg_feature = requires {
     typename T::value_type;
     { T::space } -> std::convertible_to<std::size_t>;
+};
+
+/** @brief A `cmsg_feature` that can be recognised and read off a received datagram. */
+export template <typename T>
+concept parseable_feature = cmsg_feature<T> && requires(const ::cmsghdr* c, int level, int type) {
     { T::matches(level, type) } -> std::same_as<bool>;
     { T::parse(c) } -> std::same_as<std::optional<typename T::value_type>>;
 };
 
-/** @brief A `cmsg_feature` that can also be attached to an outgoing datagram. */
+/** @brief A `cmsg_feature` that can be attached to an outgoing datagram. */
 export template <typename T>
 concept sendable_feature = cmsg_feature<T> && requires(::cmsghdr* dst, const typename T::value_type& v, family fam) {
     { T::build(dst, v, fam) } -> std::same_as<std::size_t>;
 };
 
-/** @brief A `cmsg_feature` the kernel must be told to report. */
+/** @brief A `parseable_feature` the kernel must be told to report. */
 export template <typename T>
-concept receivable_feature = cmsg_feature<T> && requires(int fd, family fam) {
+concept receivable_feature = parseable_feature<T> && requires(int fd, family fam) {
     { T::enable(fd, fam) } -> std::same_as<result<>>;
 };
 
@@ -178,8 +189,10 @@ export template <feature_set Features> [[nodiscard]] metadata<Features> parse_co
             }
             template for (constexpr auto tag : tags) {
                 using feature = typename decltype(tag)::type;
-                if (feature::matches(c->cmsg_level, c->cmsg_type)) {
-                    out.template set<feature>(feature::parse(c));
+                if constexpr (parseable_feature<feature>) {
+                    if (feature::matches(c->cmsg_level, c->cmsg_type)) {
+                        out.template set<feature>(feature::parse(c));
+                    }
                 }
             }
         }

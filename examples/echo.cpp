@@ -1,6 +1,6 @@
 // Batched UDP echo: one arena, one recvmmsg, one sendmmsg, no copy of the
-// payload. Reflects each datagram's ECN marking back and reports the local
-// address it arrived on.
+// payload. Reflects each datagram's ECN marking back, reports the local address
+// it arrived on, and splits GRO-coalesced slots back into datagrams.
 
 #include <cstdio>
 #include <cstdlib>
@@ -11,15 +11,23 @@ import dgram;
 
 namespace {
 
-constexpr std::size_t batch_capacity{64};
-constexpr std::size_t slot_bytes{2048};
+constexpr std::size_t batch_capacity{16};
 
-using metadata_set = dgram::features<dgram::pktinfo, dgram::ecn>;
-using rx_batch = dgram::receive_batch<batch_capacity, slot_bytes, metadata_set>;
+// A GRO slot can come back holding many datagrams, so it is sized for the
+// coalesced buffer rather than for one MTU. Sizing it at an MTU would turn
+// every coalesced receive into MSG_TRUNC.
+constexpr std::size_t slot_bytes{1 << 16};
+
+// The two directions carry different features: UDP_GRO is only ever received
+// and UDP_SEGMENT only ever sent.
+using rx_features = dgram::features<dgram::pktinfo, dgram::ecn, dgram::gro>;
+using tx_features = dgram::features<dgram::ecn>;
+
+using rx_batch = dgram::receive_batch<batch_capacity, slot_bytes, rx_features>;
 
 // The transmit batch references the receive slots, so it carves no payload of
 // its own; it still needs control space to attach the reflected ECN marking.
-using tx_batch = dgram::transmit_batch<batch_capacity, 0, metadata_set>;
+using tx_batch = dgram::transmit_batch<batch_capacity, 0, tx_features>;
 
 constexpr std::size_t arena_bytes{rx_batch::footprint() + tx_batch::footprint()};
 
@@ -49,7 +57,7 @@ int main(const int argc, const char* const* argv) {
     }
 
     std::println("echo listening on {} ({} B arena, {} B used, {} B control per datagram)", sock->local_address()->text(), arena.capacity(), arena.used(),
-        metadata_set::control_space);
+        rx_features::control_space);
 
     bool reported{false};
 
@@ -70,7 +78,7 @@ int main(const int argc, const char* const* argv) {
             const auto meta{d.meta()};
 
             // Reflect the sender's ECN codepoint rather than sending unmarked.
-            dgram::control<metadata_set> reply{};
+            dgram::control<tx_features> reply{};
             if (const auto marking{meta.get<dgram::ecn>()}) {
                 reply.set<dgram::ecn>(*marking);
             }
@@ -82,8 +90,13 @@ int main(const int argc, const char* const* argv) {
                 reported = true;
             }
 
-            if (!tx->stage(d.payload(), d.from(), reply)) {
-                break;
+            // One slot may hold several datagrams when the kernel coalesced.
+            // Iterating segments is correct either way, so there is nothing to
+            // branch on here.
+            for (const auto& piece : d.segments()) {
+                if (!tx->stage(piece, d.from(), reply)) {
+                    break;
+                }
             }
         }
 

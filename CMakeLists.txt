@@ -64,6 +64,7 @@ target_sources(dgram
       src/dgram/socket.cppm
       src/dgram/feature.cppm
       src/dgram/metadata.cppm
+      src/dgram/offload.cppm
       src/dgram/batch.cppm
       src/dgram/dgram.cppm
 )

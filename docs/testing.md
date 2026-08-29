@@ -20,6 +20,7 @@ checkout.
 | `loopback_tests.cpp` | Batch reuse, truncation reporting, nonblocking receive, staging limits, the error combinators. |
 | `metadata_tests.cpp` | Destination address and ECN over loopback, both families, including a feature that was never enabled and an undersized control buffer. |
 | `malformed_control_tests.cpp` | Control buffers the kernel would never write. Every case here was found by the fuzzer first. |
+| `offload_tests.cpp` | GRO and GSO over loopback, and the segmentation walk on its own: short tail, exact multiple, stride of zero, stride past the end, empty payload. |
 | `concurrency_tests.cpp` | Several workers, each with its own socket, arena and batches, running concurrently. Meaningful only under `-s thread`. |
 
 ## Configurations
@@ -45,33 +46,73 @@ configured, for exactly that reason.
 
 ## Fuzzing
 
-`fuzz/fuzz_cmsg_parse.cpp` drives `parse_control` over an arbitrary control
-buffer. That parser is the only place in the engine where attacker-controlled
-bytes meet pointer arithmetic: the `CMSG_*` macros walk the buffer using lengths
-taken from the buffer itself.
+Two harnesses, both over the paths where kernel-supplied values drive pointer
+arithmetic.
+
+`fuzz_cmsg_parse` drives `parse_control` over an arbitrary control buffer: the
+`CMSG_*` macros walk it using lengths taken from the buffer itself.
+
+`fuzz_segments` drives the GRO segmentation walk, whose stride comes from a
+control message. It asserts the properties a wrong stride would break: every
+segment lies inside the buffer, segments are contiguous and ordered, and together
+they cover the payload exactly once.
 
 ```sh
-scripts/make.sh -f
+scripts/make.sh -f                                   # standalone driver, runs under ctest
 DGRAM_FUZZ_ITERATIONS=1000000 ./build/debug-address-undefined-hardened-fuzz/fuzz/fuzz_cmsg_parse
 ```
 
-The harness is libFuzzer-shaped, but **libFuzzer is not available here**: it is a
-Clang feature, GCC has no equivalent, and Clang cannot compile this library at
-all (it supports neither expansion statements nor contracts). The coverage-guided
-path is therefore AFL++, whose compilers are GCC plugins; the build detects
-`afl-g++-fast` and uses it when present.
+## Why AFL++, and why built from source
 
-Without AFL++ the same harness links `fuzz_driver.cpp`, which replays a corpus
-and then mutates it under a fixed seed. **That is not coverage-guided** and finds
-less. It is still worth running, because it runs everywhere the library builds
-and under whichever sanitizer the build selected.
+libFuzzer is not available here. It is a Clang feature, GCC has no equivalent,
+and Clang cannot compile this library at all: it supports neither expansion
+statements nor contracts. The coverage-guided path is therefore AFL++, whose
+compilers are GCC plugins.
 
-Two properties of the harness carry most of its value, and both were learned the
-hard way:
+**Do not use a packaged AFL++.** Its GCC plugin is ABI-tied to the exact compiler
+it was built against, so a distro package and a rolling GCC drift apart within
+weeks and every build then dies at:
 
-- The control buffer is allocated to **exactly** the input length. Reusing an
-  oversized static buffer hides a short overread inside the allocation, where no
-  sanitizer sees it.
+```
+PROGRAM ABORT : GCC and plugin have incompatible versions, expected GCC 16.1.1, is 16.2.1
+```
+
+Building AFL++ from source against the compiler that is actually present makes
+that skew impossible rather than merely unlikely. Locally:
+
+```sh
+scripts/get-afl.sh          # clones a pinned tag, builds into .deps/afl
+scripts/make.sh -A -s address+undefined -H
+```
+
+`get-afl.sh` is idempotent and re-checks the existing build against the current
+GCC, so re-running it after a compiler upgrade does the right thing. Both it and
+`make.sh -A` verify the compiler accepts a real translation unit before
+committing to a build.
+
+In CI the same reasoning puts AFL++ in the toolchain image, built from source in
+the same layer as GCC (`ci/Containerfile`), so the two cannot disagree. The image
+build fails immediately if the plugin does not load, rather than a fuzz job
+failing three weeks later.
+
+Driving a harness:
+
+```sh
+AFL_PATH=$PWD/.deps/afl/lib/afl .deps/afl/bin/afl-fuzz \
+    -i fuzz/corpus -o out -V 300 -- build/<config>-afl/fuzz/fuzz_cmsg_parse
+```
+
+Without AFL++ the same harness links `fuzz_driver.cpp`'s standalone path, which
+replays the corpus and then mutates it under a fixed seed. **That is not
+coverage-guided** and finds less, but it runs everywhere the library builds and
+is what `ctest` executes.
+
+Two properties of the harnesses carry most of their value, and both were learned
+the hard way:
+
+- The buffer is allocated to **exactly** the input length. Reusing an oversized
+  static buffer hides a short overread inside the allocation, where no sanitizer
+  sees it.
 - The corpus is **seeded with well-formed control messages** at the widths the
   kernel really uses. Random bytes essentially never produce a `cmsg_len` above
   `sizeof(cmsghdr)` paired with a level and type a feature answers to, so an

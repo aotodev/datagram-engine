@@ -1,15 +1,15 @@
 /**
  * @file fuzz_driver.cpp
- * @brief Standalone `main` for builds with no fuzzing engine.
+ * @brief `main` for the fuzz harness, in two flavours.
  *
- * GCC ships no libFuzzer and AFL++ is not always installed, so this drives the
- * same `LLVMFuzzerTestOneInput` entry point directly: it replays any files given
- * on the command line, then runs a deterministic mutation loop seeded from the
- * corpus. Not coverage-guided. Its value is that it runs everywhere the library
- * builds, under whichever sanitizer the build selected.
+ * Under `afl-g++-fast` this is AFL++ persistent mode: the process is forked once
+ * and each test case is fed through shared memory, which is far faster than
+ * exec-per-input and is what makes coverage-guided fuzzing practical here.
  *
- * Linked only when the build has no engine of its own; `afl-g++-fast` supplies
- * its own driver and this file is left out.
+ * Otherwise it is a standalone driver that replays any files given on the
+ * command line and then mutates a seeded corpus under a fixed PRNG. That is
+ * **not** coverage-guided and finds much less; its value is that it runs
+ * wherever the library builds, under whichever sanitizer the build selected.
  */
 #include <cstdint>
 #include <cstdio>
@@ -17,6 +17,7 @@
 #include <cstring>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <unistd.h> // AFL++'s persistent-mode macros expand to read()
 
 import std;
 
@@ -126,6 +127,24 @@ void mutate(std::vector<std::uint8_t>& buf, std::mt19937_64& rng) {
 
 } // namespace
 
+#ifdef __AFL_COMPILER
+
+/* AFL++ persistent mode. The corpus lives on disk and afl-fuzz drives it, so
+   none of the seeding or mutation below is used. */
+__AFL_FUZZ_INIT();
+
+int main() {
+    __AFL_INIT();
+    const unsigned char* buf{__AFL_FUZZ_TESTCASE_BUF};
+    while (__AFL_LOOP(100000)) {
+        const int len{__AFL_FUZZ_TESTCASE_LEN};
+        LLVMFuzzerTestOneInput(buf, static_cast<std::size_t>(len));
+    }
+    return 0;
+}
+
+#else
+
 int main(const int argc, const char* const* argv) {
     auto corpus{builtin_seeds()};
 
@@ -156,6 +175,8 @@ int main(const int argc, const char* const* argv) {
         LLVMFuzzerTestOneInput(buf.data(), buf.size());
     }
 
-    std::println("fuzz_cmsg_parse: {} corpus files replayed, {} mutated inputs, no crash", replayed, iterations);
+    std::println("{}: {} corpus files replayed, {} mutated inputs, no crash", argc > 0 ? argv[0] : "fuzz", replayed, iterations);
     return 0;
 }
+
+#endif // __AFL_COMPILER

@@ -89,6 +89,7 @@ One received datagram, borrowed from the batch that received it.
 | `const endpoint& from()` | Sender address, referencing the batch's own storage. |
 | `int flags()` | Raw `msg_flags`. |
 | `metadata<Features> meta()` | Parse this datagram's ancillary data. See [metadata](metadata.md). |
+| `auto segments()` | Lazy view of the datagrams packed into this slot. One element unless the kernel coalesced. See [offload](offload.md). |
 | `bool truncated()` | `MSG_TRUNC`: the payload did not fit `SlotBytes` and the excess is gone. |
 | `bool control_truncated()` | `MSG_CTRUNC`: ancillary data did not fit and some is gone. |
 | `bool intact()` | Neither. |

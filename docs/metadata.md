@@ -134,9 +134,13 @@ struct my_feature {
 };
 ```
 
-`cmsg_feature` requires the first four; `sendable_feature` adds `build` and
-`receivable_feature` adds `enable`. A feature appearing in both families sets
-`space` to the larger payload.
+`cmsg_feature` requires only `value_type` and `space`, because not every feature
+travels both ways: `parseable_feature` adds `matches` and `parse`,
+`sendable_feature` adds `build`, and `receivable_feature` is a `parseable_feature`
+with `enable`. `gro` is receivable but not sendable and `segment` the reverse, so
+a receive and a transmit batch take their own sets.
+
+A feature appearing in both families sets `space` to the larger payload.
 
 `parse` returns nothing when the payload is narrower than what it would read.
 That check is the feature's job, because only it knows what widths the kernel

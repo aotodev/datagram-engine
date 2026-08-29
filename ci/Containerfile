@@ -1,0 +1,40 @@
+# Toolchain image for datagram_engine CI. Arch tracks a new enough GCC for the
+# C++26 features this project uses: expansion statements, contracts, import std.
+FROM archlinux:latest
+
+# Links the published package to the repo, so it inherits the repo's permissions.
+LABEL org.opencontainers.image.source=https://github.com/aotodev/datagram_engine
+
+# iproute2: `tc qdisc ... root fq`, which SO_TXTIME pacing needs to do anything.
+RUN pacman -Syu --noconfirm \
+        gcc \
+        cmake ninja \
+        git make \
+        gtest \
+        iproute2 \
+    && pacman -Scc --noconfirm
+
+# AFL++ is built from source, here, against the GCC installed above.
+#
+# This is the whole reason it is not a pacman package. AFL++'s GCC plugin is
+# ABI-tied to the exact compiler it was compiled against, and a distro package
+# is built against whatever GCC the distro had that day. On a rolling base the
+# two drift apart within weeks and afl-g++-fast then refuses to run:
+#
+#   PROGRAM ABORT : GCC and plugin have incompatible versions
+#
+# Building it in the same layer as the compiler makes that skew impossible
+# rather than merely unlikely. The AFL++ tag is pinned so the tool itself is
+# reproducible; the GCC it binds to is deliberately whatever this image has.
+ARG AFL_VERSION=v5.02c
+RUN git clone --depth 1 --branch "${AFL_VERSION}" \
+        https://github.com/AFLplusplus/AFLplusplus.git /tmp/afl \
+    && make -C /tmp/afl all -j"$(nproc)" \
+    && make -C /tmp/afl gcc_plugin -j"$(nproc)" \
+    && make -C /tmp/afl install PREFIX=/usr/local \
+    && rm -rf /tmp/afl
+
+# Fail the image build rather than a fuzz job three weeks later.
+RUN echo 'int main(){return 0;}' > /tmp/probe.c \
+    && afl-gcc-fast /tmp/probe.c -o /tmp/probe \
+    && rm -f /tmp/probe.c /tmp/probe
