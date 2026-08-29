@@ -162,12 +162,20 @@ namespace detail {
  * Bounded by `msg_controllen`, which after `recvmmsg` holds what was actually
  * received. A truncated buffer therefore yields a short parse rather than a read
  * past the end, and the loss is reported separately as `MSG_CTRUNC`.
+ *
+ * Each message is also checked against the buffer before a feature sees it: a
+ * `cmsg_len` that overruns what was received passes `CMSG_FIRSTHDR` untouched.
  */
 export template <feature_set Features> [[nodiscard]] metadata<Features> parse_control(const ::msghdr& m) noexcept {
     metadata<Features> out{};
     if constexpr (Features::count > 0) {
         static constexpr typename Features::tags tags{};
         for (const ::cmsghdr* c{first_header(m)}; c != nullptr; c = next_header(m, c)) {
+            // A message whose declared length overruns the buffer cannot be
+            // trusted, and neither can anything after it: stop rather than skip.
+            if (!within_buffer(m, c)) {
+                break;
+            }
             template for (constexpr auto tag : tags) {
                 using feature = typename decltype(tag)::type;
                 if (feature::matches(c->cmsg_level, c->cmsg_type)) {

@@ -67,14 +67,48 @@ inline std::byte* data_of(::cmsghdr* c) noexcept {
 // NOLINTEND(cppcoreguidelines-pro-type-cstyle-cast, cppcoreguidelines-pro-bounds-pointer-arithmetic)
 
 /**
- * @brief Payload bytes carried by `c`, excluding the header.
+ * @brief Payload bytes carried by `c`, excluding the header. Zero if malformed.
  *
  * The number to check before reading: the kernel picks the width, and it is not
  * the same across families. `IP_TOS` arrives as one byte and `IPV6_TCLASS` as a
  * four-byte `int`, so a reader that assumes either one overreads on the other.
+ *
+ * Saturates rather than wrapping. `CMSG_FIRSTHDR` only checks that
+ * `msg_controllen` is large enough for a header, never that `cmsg_len` itself
+ * is, so a buffer claiming `cmsg_len < CMSG_LEN(0)` reaches here. Subtracting in
+ * `size_t` would then underflow to an enormous width, every caller's guard would
+ * pass, and the read would run off the buffer.
  */
-inline std::size_t payload_size(const ::cmsghdr* c) noexcept {
-    return static_cast<std::size_t>(c->cmsg_len) - length_for(0);
+export inline std::size_t payload_size(const ::cmsghdr* c) noexcept {
+    const auto len{static_cast<std::size_t>(c->cmsg_len)};
+    constexpr auto header{length_for(0)};
+    return len < header ? 0 : len - header;
+}
+
+/**
+ * @brief Whether `c` lies wholly inside `m`'s control buffer.
+ *
+ * `CMSG_FIRSTHDR` only checks that `msg_controllen` can hold a header; it never
+ * checks the header it then returns. A message claiming a `cmsg_len` larger than
+ * the buffer that carries it therefore reaches a parser intact, and reading its
+ * declared payload runs off the end.
+ *
+ * The kernel does not produce such a buffer. Anything that reaches this parser
+ * from elsewhere might, and the walk costs one comparison per message.
+ */
+export inline bool within_buffer(const ::msghdr& m, const ::cmsghdr* c) noexcept {
+    const auto* const base{static_cast<const std::byte*>(m.msg_control)};
+    const auto* const start{reinterpret_cast<const std::byte*>(c)};
+    if (base == nullptr || start < base) {
+        return false;
+    }
+    const auto offset{static_cast<std::size_t>(start - base)};
+    const auto controllen{static_cast<std::size_t>(m.msg_controllen)};
+    if (offset > controllen || controllen - offset < length_for(0)) {
+        return false;
+    }
+    const auto len{static_cast<std::size_t>(c->cmsg_len)};
+    return len >= length_for(0) && len <= controllen - offset;
 }
 
 /** @brief The payload as bytes, sized by `cmsg_len`. */

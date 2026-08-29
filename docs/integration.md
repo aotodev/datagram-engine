@@ -28,8 +28,11 @@ any dependency is configured, so the whole build agrees. A per-target
 `-fsanitize` forks the std BMI and every importer then fails with
 `import 'std' has CRC mismatch`.
 
-The same reasoning is why `USE_SANITIZERS` is unprefixed: inheriting the
-parent's value is the correct behaviour.
+dgram applies its own instrumentation at directory scope and forces libmem's
+`USE_SANITIZERS` off, so there is exactly one source of sanitizer flags. libmem
+applies its own per-config through an interface target, which reaches every real
+target but not CMake's synthesised `import std` one; in a Debug build that
+asymmetry alone is a CRC mismatch.
 
 ## Options
 

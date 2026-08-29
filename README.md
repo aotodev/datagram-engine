@@ -65,6 +65,14 @@ if (const auto marking{meta.get<dgram::ecn>()}) { reply.set<dgram::ecn>(*marking
 Needs GCC >= 16, CMake >= 3.30 and Ninja. Linux only.
 
 ```sh
+scripts/make.sh                          # Debug build + tests
+scripts/make.sh -s address+undefined -H  # sanitized and hardened
+scripts/make.sh -a                       # every defensive configuration
+```
+
+Or directly with CMake:
+
+```sh
 cmake -S . -B build -G Ninja -DDGRAM_BUILD_TESTS=ON -DDGRAM_BUILD_EXAMPLES=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
@@ -72,6 +80,17 @@ ctest --test-dir build --output-on-failure
 
 `libmem` is fetched automatically; point at a local checkout with
 `-DFETCHCONTENT_SOURCE_DIR_LIBMEM=/path/to/libmem`.
+
+## Tested and fuzzed
+
+Every configuration builds and runs the suite: plain, **ASan + UBSan**,
+**ThreadSanitizer**, and a **hardened** build with `_GLIBCXX_ASSERTIONS` and
+stack protection. The concurrency suite exists specifically to put the
+shared-nothing threading claim under a race detector.
+
+The ancillary-data parser is fuzzed, since it is the one place attacker-supplied
+bytes meet pointer arithmetic. Everything the fuzzer has found is pinned as a
+unit test. Details in [docs/testing.md](docs/testing.md).
 
 ## Status
 
@@ -86,3 +105,4 @@ covering GRO/GSO, pacing and demultiplexing, are in progress.
 - [Ancillary data](docs/metadata.md): the feature set, destination address, ECN, and writing a feature.
 - [Errors](docs/errors.md): `result`, `errc`, and the pipe combinators.
 - [Integration](docs/integration.md): consuming dgram from another CMake project.
+- [Testing](docs/testing.md): the build matrix, what each suite covers, and how the fuzzing works.

@@ -15,10 +15,12 @@ if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_VERSION VERSIO
     message(FATAL_ERROR "GCC >= 16 is required. Detected: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 endif()
 
-option(DGRAM_BUILD_TESTS    "Build unit tests"       OFF)
-option(DGRAM_BUILD_EXAMPLES "Build examples"         OFF)
-option(USE_SANITIZERS       "Enable ASan/UBSan"      OFF)
+option(DGRAM_BUILD_TESTS    "Build unit tests"             OFF)
+option(DGRAM_BUILD_EXAMPLES "Build examples"               OFF)
+option(DGRAM_BUILD_FUZZERS  "Build the fuzz harnesses"     OFF)
 option(DGRAM_CONTRACTS      "Enable C++26 contract checks" ON)
+
+include(dgram_hardening)
 
 if(PROJECT_IS_TOP_LEVEL)
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -29,12 +31,8 @@ if(PROJECT_IS_TOP_LEVEL)
     set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 endif()
 
-# Sanitizers are directory-wide and must be set before libmem is configured:
-# `import std;` builds its BMI from the target's flags, so a per-target
-# -fsanitize forks the std BMI and every importer fails with a CRC mismatch.
-if(USE_SANITIZERS AND PROJECT_IS_TOP_LEVEL)
-    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
-    add_link_options(-fsanitize=address,undefined)
+if(PROJECT_IS_TOP_LEVEL)
+    dgram_apply_hardening()
 endif()
 
 # libmem supplies the arena the batches are carved from.
@@ -96,8 +94,6 @@ if(DGRAM_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
-if(PROJECT_IS_TOP_LEVEL AND UNIX)
-    execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
-        ${CMAKE_BINARY_DIR}/compile_commands.json
-        ${CMAKE_SOURCE_DIR}/compile_commands.json)
+if(DGRAM_BUILD_FUZZERS)
+    add_subdirectory(fuzz)
 endif()
