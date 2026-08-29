@@ -1,0 +1,5 @@
+build*/
+*.local.md
+compile_commands.json
+.cache/
+.clangd/
