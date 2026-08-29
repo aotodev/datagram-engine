@@ -50,10 +50,10 @@ export struct layout {
      */
     [[nodiscard]] constexpr std::size_t bytes() const noexcept {
         constexpr auto block = [](const std::size_t n, const std::size_t align) constexpr noexcept { return n == 0 ? 0 : n + align - 1; };
-        return block(capacity * sizeof(::mmsghdr), alignof(::mmsghdr))    //
-               + block(capacity * sizeof(::iovec), alignof(::iovec))      //
-               + block(capacity * sizeof(endpoint), alignof(endpoint))    //
-               + block(capacity * control_bytes, alignof(::cmsghdr))      //
+        return block(capacity * sizeof(::mmsghdr), alignof(::mmsghdr)) //
+               + block(capacity * sizeof(::iovec), alignof(::iovec))   //
+               + block(capacity * sizeof(endpoint), alignof(endpoint)) //
+               + block(capacity * control_bytes, alignof(::cmsghdr))   //
                + block(capacity * slot_bytes, slot_alignment);
     }
 };
@@ -112,8 +112,13 @@ struct to_datagram_fn {
 
 inline constexpr to_datagram_fn to_datagram{};
 
-/** @brief Carve `count` objects out of `r`, empty if it is exhausted. */
-template <typename T, libmem::aligned_memory_resource R>
+/**
+ * @brief Carve `count` objects out of `r`, empty if it is exhausted.
+ *
+ * Never paired with a `deallocate`, which is what `aligned_monotonic_resource`
+ * requires of `R`: the caller's resource reclaims every block at once.
+ */
+template <typename T, libmem::aligned_monotonic_resource R>
 [[nodiscard]] std::span<T> carve_span(R& r, const std::size_t count, const std::size_t align = alignof(T)) noexcept {
     if (count == 0) {
         return {};
@@ -137,8 +142,7 @@ template <typename T, libmem::aligned_memory_resource R>
  * Not thread-safe and not meant to be: the engine's model is one batch per
  * thread behind `SO_REUSEPORT`, so a batch never crosses a thread boundary.
  */
-export template <std::size_t Capacity, std::size_t SlotBytes, feature_set Features = no_features>
-class receive_batch {
+export template <std::size_t Capacity, std::size_t SlotBytes, feature_set Features = no_features> class receive_batch {
     static_assert(Capacity > 0 && Capacity <= IOV_MAX, "capacity must fit IOV_MAX");
     static_assert(SlotBytes > 0, "a receive slot needs room for a datagram");
 
@@ -159,9 +163,12 @@ public:
      *
      * Every allocation the batch will ever make happens here. After this
      * returns, the receive path allocates nothing.
+     *
+     * The batch borrows and never frees, so `resource` must outlive it and must
+     * reclaim in bulk. That is what `aligned_monotonic_resource` asks for: an
+     * arena, or a caller's own bump allocator that opts in.
      */
-    template <libmem::aligned_memory_resource R>
-    [[nodiscard]] static result<receive_batch> carve(R& resource) noexcept {
+    template <libmem::aligned_monotonic_resource R> [[nodiscard]] static result<receive_batch> carve(R& resource) noexcept {
         receive_batch b{};
         b.msgs_ = detail::carve_span<::mmsghdr>(resource, Capacity);
         b.iovs_ = detail::carve_span<::iovec>(resource, Capacity);
@@ -169,8 +176,8 @@ public:
         b.control_ = detail::carve_span<std::byte>(resource, Capacity * Features::control_space, alignof(::cmsghdr));
         b.payload_ = detail::carve_span<std::byte>(resource, Capacity * SlotBytes, slot_alignment);
 
-        const bool complete{!b.msgs_.empty() && !b.iovs_.empty() && !b.addrs_.empty() && !b.payload_.empty()
-                            && (Features::control_space == 0 || !b.control_.empty())};
+        const bool complete{
+            !b.msgs_.empty() && !b.iovs_.empty() && !b.addrs_.empty() && !b.payload_.empty() && (Features::control_space == 0 || !b.control_.empty())};
         if (!complete) [[unlikely]] {
             return std::unexpected{out_of_memory};
         }
@@ -204,9 +211,7 @@ public:
     }
 
     /** @brief Lazy view over the datagrams the last `receive` produced. */
-    [[nodiscard]] auto datagrams() const noexcept {
-        return std::span<const ::mmsghdr>{msgs_.data(), received_} | std::views::transform(detail::to_datagram);
-    }
+    [[nodiscard]] auto datagrams() const noexcept { return std::span<const ::mmsghdr>{msgs_.data(), received_} | std::views::transform(detail::to_datagram); }
 
     [[nodiscard]] constexpr std::size_t received() const noexcept { return received_; }
 
@@ -276,8 +281,7 @@ private:
  * must stay put until `flush` returns. `SlotBytes` of zero carves no payload
  * memory at all and leaves only the referencing path available.
  */
-export template <std::size_t Capacity, std::size_t SlotBytes = 0, feature_set Features = no_features>
-class transmit_batch {
+export template <std::size_t Capacity, std::size_t SlotBytes = 0, feature_set Features = no_features> class transmit_batch {
     static_assert(Capacity > 0 && Capacity <= IOV_MAX, "capacity must fit IOV_MAX");
 
 public:
@@ -291,8 +295,7 @@ public:
 
     static constexpr std::size_t footprint() noexcept { return geometry.bytes(); }
 
-    template <libmem::aligned_memory_resource R>
-    [[nodiscard]] static result<transmit_batch> carve(R& resource) noexcept {
+    template <libmem::aligned_monotonic_resource R> [[nodiscard]] static result<transmit_batch> carve(R& resource) noexcept {
         transmit_batch b{};
         b.msgs_ = detail::carve_span<::mmsghdr>(resource, Capacity);
         b.iovs_ = detail::carve_span<::iovec>(resource, Capacity);
@@ -300,8 +303,8 @@ public:
         b.control_ = detail::carve_span<std::byte>(resource, Capacity * Features::control_space, alignof(::cmsghdr));
         b.payload_ = detail::carve_span<std::byte>(resource, Capacity * SlotBytes, slot_alignment);
 
-        const bool complete{!b.msgs_.empty() && !b.iovs_.empty() && !b.addrs_.empty() && (Features::control_space == 0 || !b.control_.empty())
-                            && (SlotBytes == 0 || !b.payload_.empty())};
+        const bool complete{!b.msgs_.empty() && !b.iovs_.empty() && !b.addrs_.empty() && (Features::control_space == 0 || !b.control_.empty()) &&
+                            (SlotBytes == 0 || !b.payload_.empty())};
         if (!complete) [[unlikely]] {
             return std::unexpected{out_of_memory};
         }
