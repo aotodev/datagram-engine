@@ -105,10 +105,9 @@ An empty queue is a success with no value, not an error. This only ever reports
 anything once `fq` is in place; with no queueing discipline there is nothing to
 miss a deadline.
 
-## Not included: a timer wheel
+## Pacing is not a timer
 
-Protocol timeouts, retransmission and loss detection all want an efficient timer
-structure, and pacing is often discussed alongside it. It is deliberately not
-here. Pacing schedules a datagram the engine is already holding; a timer wheel
-schedules a callback against connection state, and there is no connection state
-in the engine until demultiplexing exists. It belongs with that, not with this.
+The two are often discussed together and are different things. Pacing hands the
+kernel a departure time for a datagram the engine is already holding; a timer
+schedules a callback against connection state. See [timers](timers.md) for the
+latter.

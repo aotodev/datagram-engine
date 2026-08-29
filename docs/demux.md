@@ -141,8 +141,7 @@ to ask whether the bytes it was handed are complete.
 The `unmatched` callback is where a server decides whether to accept a new
 connection. The overload without it discards unmatched datagrams.
 
-## Not included: a timer wheel
+## Timeouts
 
-Still to come. Protocol timeouts, retransmission and loss detection all want one,
-and now that flow state exists there is something for it to time out. It lands
-next.
+Flow state needs to expire. See [timers](timers.md) for the wheel, which pairs
+with `flow_table` by carrying a key or an index as its payload.

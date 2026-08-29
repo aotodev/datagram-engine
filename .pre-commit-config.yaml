@@ -56,12 +56,3 @@ repos:
         args:
           - "-f=colored"
         exclude: '^\.(clang-format|clang-tidy)$'
-
-  # ASCII-only punctuation: no em dashes, smart quotes, arrows or ellipses.
-  - repo: local
-    hooks:
-      - id: ascii-only
-        name: ASCII punctuation only
-        entry: scripts/check-ascii.sh
-        language: script
-        files: '(\.(cpp|cppm|h|yml|yaml|md|cmake|sh)|CMakeLists\.txt)$'

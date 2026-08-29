@@ -22,6 +22,7 @@ checkout.
 | `malformed_control_tests.cpp` | Control buffers the kernel would never write. Every case here was found by the fuzzer first. |
 | `offload_tests.cpp` | GRO and GSO over loopback, and the segmentation walk on its own: short tail, exact multiple, stride of zero, stride past the end, empty payload. |
 | `demux_tests.cpp` | Key equality and hash agreement (including the flow-label and padding cases), the flow table under churn and at capacity, projections, and routing a GRO slot whose datagrams belong to different flows. |
+| `timer_tests.cpp` | The timing wheel: every delay across every level boundary, stepped one tick at a time and jumped, from several epochs, plus a differential run against a naive reference. |
 | `pacing_tests.cpp` | The rate arithmetic exhaustively (monotonicity, drift, extreme rates, constexpr), plus what the kernel side allows unprivileged. Real pacing needs `fq` and `CAP_NET_ADMIN`, so no test here asserts a datagram was actually delayed. |
 | `concurrency_tests.cpp` | Several workers, each with its own socket, arena and batches, running concurrently. Meaningful only under `-s thread`. |
 
@@ -58,6 +59,11 @@ arithmetic.
 control message. It asserts the properties a wrong stride would break: every
 segment lies inside the buffer, segments are contiguous and ordered, and together
 they cover the payload exactly once.
+
+`fuzz_timer` drives the timing wheel differentially against a naive reference,
+across random epochs, delays and step sizes. The wheel is not attacker-facing,
+but its cascade only runs on wrap ticks, which is the shape that is right for
+most delays and wrong for a few.
 
 `fuzz_demux` drives the payload key projection, which reads bytes at an offset
 out of an attacker-supplied datagram, and drives the flow table differentially

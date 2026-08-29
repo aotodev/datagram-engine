@@ -14,3 +14,4 @@ export import :metadata;
 export import :offload;
 export import :pacing;
 export import :socket;
+export import :timer;

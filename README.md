@@ -23,6 +23,7 @@ not.
 | `gro` / `segment` | Hardware segmentation offload: many datagrams per slot in, one large buffer out. |
 | `txtime` / `pacer` | Per-datagram departure times via `SO_TXTIME`, and drift-free rate arithmetic. |
 | `flow_table` / `route` | Open-addressing demultiplexing to protocol state, keyed by a caller-supplied projection. |
+| `timer_wheel` | Hierarchical timing wheel for protocol timeouts: constant-time schedule, cancel and expiry. |
 | `result` | `std::expected` over `errno`, with left-to-right pipe combinators. |
 
 ## What makes it different
@@ -114,10 +115,10 @@ const auto counts{dgram::route(batch, dgram::by_payload_id<1, 8>{}, flows, now)}
 
 ## Status
 
-Phases 1 to 5 are done and tested, except the timer wheel, which lands next: the memory model, the batching syscalls,
+All five phases are done and tested: the memory model, the batching syscalls,
 ancillary data (destination address and ECN, both families), segmentation
-offload (`UDP_GRO` / `UDP_SEGMENT`), transmit pacing (`SO_TXTIME`), and
-demultiplexing.
+offload (`UDP_GRO` / `UDP_SEGMENT`), transmit pacing (`SO_TXTIME`),
+demultiplexing, and protocol timers.
 
 Pacing needs `tc qdisc add dev <iface> root fq` on the interface or the kernel
 ignores every departure time without reporting anything; see
@@ -131,6 +132,7 @@ ignores every departure time without reporting anything; see
 - [Offload](docs/offload.md): GRO and GSO, slot sizing, and the segmentation view.
 - [Pacing](docs/pacing.md): `SO_TXTIME`, the `fq` precondition, and the rate arithmetic.
 - [Demultiplexing](docs/demux.md): the protocol boundary, key projections, the flow table, and routing.
+- [Timers](docs/timers.md): the timing wheel, handles, and what it refuses.
 - [Errors](docs/errors.md): `result`, `errc`, and the pipe combinators.
 - [Integration](docs/integration.md): consuming dgram from another CMake project.
 - [Testing](docs/testing.md): the build matrix, what each suite covers, and how the fuzzing works.
