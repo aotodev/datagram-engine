@@ -4,8 +4,8 @@
  */
 module;
 
-#include <cerrno>
 #include <arpa/inet.h>
+#include <cerrno>
 #include <netinet/in.h>
 #include <sys/socket.h>
 
@@ -17,7 +17,10 @@ import :error;
 namespace dgram {
 
 /** @brief Address family of an endpoint. */
-export enum class family : std::uint8_t { inet4, inet6 };
+export enum class family : std::uint8_t {
+    inet4,
+    inet6
+};
 
 /**
  * @brief An IP address and port, stored in the kernel's own layout.

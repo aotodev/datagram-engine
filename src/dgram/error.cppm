@@ -19,7 +19,8 @@ namespace dgram {
  * Zero is not representable: a `result` holding an error always holds a real
  * failure, so `has_value()` is the only success test needed.
  */
-export enum class errc : int {};
+export enum class errc : int {
+};
 
 /**
  * @brief The `errno` values a caller routinely branches on.
@@ -42,12 +43,10 @@ export [[nodiscard]] inline std::string_view describe(const errc e) noexcept {
 }
 
 /** @brief The result of anything that can fail at the syscall boundary. */
-export template <typename T = void>
-using result = std::expected<T, errc>;
+export template <typename T = void> using result = std::expected<T, errc>;
 
 /** @brief Build a failed `result<T>` from the current `errno`. */
-export template <typename T = void>
-[[nodiscard]] inline result<T> fail() noexcept {
+export template <typename T = void> [[nodiscard]] inline result<T> fail() noexcept {
     return std::unexpected{errc{errno}};
 }
 
@@ -77,14 +76,10 @@ export template <typename F, typename... Args>
 
 namespace detail {
 
-template <typename Fn, typename Tag>
-struct closure {
+template <typename Fn, typename Tag> struct closure {
     Fn fn;
 
-    template <typename E>
-    friend constexpr auto operator|(E&& e, closure c) {
-        return Tag::apply(std::forward<E>(e), std::move(c.fn));
-    }
+    template <typename E> friend constexpr auto operator|(E&& e, closure c) { return Tag::apply(std::forward<E>(e), std::move(c.fn)); }
 };
 
 struct then_tag {
@@ -102,20 +97,17 @@ struct recover_tag {
 } // namespace detail
 
 /** @brief Chain a step that itself returns a `result`. */
-export template <typename Fn>
-[[nodiscard]] constexpr auto then(Fn&& fn) {
+export template <typename Fn> [[nodiscard]] constexpr auto then(Fn&& fn) {
     return detail::closure<std::decay_t<Fn>, detail::then_tag>{std::forward<Fn>(fn)};
 }
 
 /** @brief Transform the value, leaving an error untouched. */
-export template <typename Fn>
-[[nodiscard]] constexpr auto map(Fn&& fn) {
+export template <typename Fn> [[nodiscard]] constexpr auto map(Fn&& fn) {
     return detail::closure<std::decay_t<Fn>, detail::map_tag>{std::forward<Fn>(fn)};
 }
 
 /** @brief Handle an error, producing a `result` of the same value type. */
-export template <typename Fn>
-[[nodiscard]] constexpr auto recover(Fn&& fn) {
+export template <typename Fn> [[nodiscard]] constexpr auto recover(Fn&& fn) {
     return detail::closure<std::decay_t<Fn>, detail::recover_tag>{std::forward<Fn>(fn)};
 }
 
@@ -126,8 +118,7 @@ export template <typename Fn>
  * not have to break the pipe apart. Yields by value: `expected` cannot hold a
  * reference, so forwarding one out of here would not compile.
  */
-export template <typename Fn>
-[[nodiscard]] constexpr auto tap(Fn&& fn) {
+export template <typename Fn> [[nodiscard]] constexpr auto tap(Fn&& fn) {
     return map([f = std::forward<Fn>(fn)]<typename V>(V&& v) -> std::remove_cvref_t<V> {
         std::invoke(f, std::as_const(v));
         return std::forward<V>(v);

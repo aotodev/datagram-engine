@@ -1,6 +1,7 @@
 // Pure compile-time checks over the geometry and feature-set layer. Never run.
 
 import std;
+import libmem;
 import dgram;
 
 namespace {
@@ -48,5 +49,20 @@ using tx_ref = dgram::transmit_batch<32>;
 using tx_own = dgram::transmit_batch<32, 1500>;
 static_assert(tx_ref::footprint() < tx_own::footprint());
 
+/* Carving borrows and never frees, so a resource that expects paired
+   deallocation must not be accepted: it would leak every block. */
+template <typename R>
+concept carvable = requires(R& r) { dgram::receive_batch<8, 64>::carve(r); };
+
+static_assert(carvable<libmem::arena>);
+static_assert(carvable<libmem::typed_arena>);
+static_assert(carvable<libmem::resource_ref<libmem::arena>>);
+static_assert(!carvable<libmem::default_resource>, "operator new expects a paired delete");
+static_assert(!carvable<libmem::resource_ref<libmem::default_resource>>);
+
+/* allocator_resource is excluded a step earlier: it cannot express a runtime
+   alignment, so it is deliberately not an aligned_memory_resource at all. */
+static_assert(!libmem::aligned_memory_resource<libmem::allocator_resource<std::allocator<int>>>);
+static_assert(!carvable<libmem::allocator_resource<std::allocator<int>>>);
 
 } // namespace

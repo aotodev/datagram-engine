@@ -32,8 +32,7 @@ concept socket_option = requires(int fd) {
 namespace detail {
 
 /** @brief `setsockopt` for any trivially copyable payload. */
-template <typename T>
-[[nodiscard]] inline result<> set_option(const int fd, const int level, const int name, const T& value) noexcept {
+template <typename T> [[nodiscard]] inline result<> set_option(const int fd, const int level, const int name, const T& value) noexcept {
     if (::setsockopt(fd, level, name, &value, static_cast<::socklen_t>(sizeof(T))) < 0) [[unlikely]] {
         return fail<>();
     }
@@ -41,8 +40,7 @@ template <typename T>
 }
 
 /** @brief A boolean-valued option, the shape most of `SOL_SOCKET` takes. */
-template <int Level, int Name>
-struct flag_option {
+template <int Level, int Name> struct flag_option {
     [[nodiscard]] static result<> apply(const int fd) noexcept { return set_option(fd, Level, Name, 1); }
 };
 
@@ -66,14 +64,12 @@ export struct nonblocking {
 };
 
 /** @brief `SO_RCVBUF`. The kernel doubles the request and caps it at `rmem_max`. */
-export template <std::size_t Bytes>
-struct recv_buffer {
+export template <std::size_t Bytes> struct recv_buffer {
     [[nodiscard]] static result<> apply(const int fd) noexcept { return detail::set_option(fd, SOL_SOCKET, SO_RCVBUF, static_cast<int>(Bytes)); }
 };
 
 /** @brief `SO_SNDBUF`. Doubled and capped like `recv_buffer`. */
-export template <std::size_t Bytes>
-struct send_buffer {
+export template <std::size_t Bytes> struct send_buffer {
     [[nodiscard]] static result<> apply(const int fd) noexcept { return detail::set_option(fd, SOL_SOCKET, SO_SNDBUF, static_cast<int>(Bytes)); }
 };
 
@@ -117,8 +113,7 @@ public:
      * The descriptor is closed if any option fails, so a failed open leaks
      * nothing and the caller sees the first error rather than the last.
      */
-    template <socket_option... Options>
-    [[nodiscard]] static result<socket> open(const family fam) noexcept {
+    template <socket_option... Options> [[nodiscard]] static result<socket> open(const family fam) noexcept {
         const int domain{fam == family::inet4 ? AF_INET : AF_INET6};
         const int fd{::socket(domain, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP)};
         if (fd < 0) [[unlikely]] {

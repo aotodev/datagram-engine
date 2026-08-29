@@ -31,8 +31,7 @@ concept cmsg_feature = requires {
 namespace detail {
 
 /** @brief How many times `F` appears in `Ts`. */
-template <typename F, typename... Ts>
-inline constexpr std::size_t occurrences{(std::size_t{0} + ... + static_cast<std::size_t>(std::same_as<F, Ts>))};
+template <typename F, typename... Ts> inline constexpr std::size_t occurrences{(std::size_t{0} + ... + static_cast<std::size_t>(std::same_as<F, Ts>))};
 
 } // namespace detail
 
@@ -42,8 +41,7 @@ inline constexpr std::size_t occurrences{(std::size_t{0} + ... + static_cast<std
  * Duplicates are rejected: a repeated feature would double-count the control
  * buffer and leave its second parse step unreachable.
  */
-export template <cmsg_feature... Fs>
-struct features {
+export template <cmsg_feature... Fs> struct features {
     static_assert(((detail::occurrences<Fs, Fs...> == 1) && ...), "a feature list must not repeat a feature");
 
     static constexpr std::size_t count{sizeof...(Fs)};
@@ -52,8 +50,7 @@ struct features {
     static constexpr std::size_t control_space{(std::size_t{0} + ... + Fs::space)};
 
     /** @brief Whether `F` is a member of this set. */
-    template <typename F>
-    static constexpr bool contains{(std::same_as<F, Fs> || ...)};
+    template <typename F> static constexpr bool contains{(std::same_as<F, Fs> || ...)};
 };
 
 /** @brief What a batch requires of its feature-set parameter. */

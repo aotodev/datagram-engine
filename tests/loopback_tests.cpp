@@ -85,9 +85,8 @@ TEST(Loopback, DeliversAWholeBatch) {
     EXPECT_EQ(*got, sent_count);
 
     const auto texts{rx->datagrams() | std::views::transform([](const dgram::datagram& d) {
-                         return std::string{reinterpret_cast<const char*>(d.payload().data()), d.payload().size()};
-                     })
-                     | std::ranges::to<std::vector>()};
+        return std::string{reinterpret_cast<const char*>(d.payload().data()), d.payload().size()};
+    }) | std::ranges::to<std::vector>()};
     EXPECT_TRUE(std::ranges::equal(texts, payloads));
     EXPECT_TRUE(std::ranges::all_of(rx->datagrams(), &dgram::datagram::intact));
 }
