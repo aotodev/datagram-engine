@@ -72,6 +72,7 @@ Phase 1 (memory model and the batching syscalls) is done and tested. Phases 2 to
 
 ## Docs
 
-- [Design](docs/design.md): the layers, the span-lifetime contract, and the threading model.
-- [Memory](docs/memory.md): the footprint calculation, carving, and the reuse discipline.
-- [Traps](docs/traps.md): kernel behaviour that costs a bug the first time.
+- [Sockets](docs/sockets.md): `socket`, `endpoint`, and the option set.
+- [Batches](docs/batches.md): sizing, carving, receiving, transmitting, and the borrow contract.
+- [Errors](docs/errors.md): `result`, `errc`, and the pipe combinators.
+- [Integration](docs/integration.md): consuming dgram from another CMake project.
