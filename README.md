@@ -22,6 +22,7 @@ not.
 | `pktinfo` / `ecn` | Which local address a datagram arrived on, and its ECN marking. Both families. |
 | `gro` / `segment` | Hardware segmentation offload: many datagrams per slot in, one large buffer out. |
 | `txtime` / `pacer` | Per-datagram departure times via `SO_TXTIME`, and drift-free rate arithmetic. |
+| `flow_table` / `route` | Open-addressing demultiplexing to protocol state, keyed by a caller-supplied projection. |
 | `result` | `std::expected` over `errno`, with left-to-right pipe combinators. |
 
 ## What makes it different
@@ -103,12 +104,20 @@ on whether the kernel coalesced.
 for (const auto& piece : d.segments()) { (void)tx->stage(piece, d.from(), reply); }
 ```
 
+**Protocol code never sees a socket.** A sink takes an `arrival`: bytes, a peer,
+parsed metadata, a time. Which key identifies a flow is the caller's, because a
+QUIC connection survives its peer changing address and the 4-tuple does not.
+
+```cpp
+const auto counts{dgram::route(batch, dgram::by_payload_id<1, 8>{}, flows, now)};
+```
+
 ## Status
 
-Phases 1 to 4 are done and tested: the memory model, the batching syscalls,
+Phases 1 to 5 are done and tested, except the timer wheel, which lands next: the memory model, the batching syscalls,
 ancillary data (destination address and ECN, both families), segmentation
-offload (`UDP_GRO` / `UDP_SEGMENT`), and transmit pacing (`SO_TXTIME`). Phase 5,
-demultiplexing, is in progress.
+offload (`UDP_GRO` / `UDP_SEGMENT`), transmit pacing (`SO_TXTIME`), and
+demultiplexing.
 
 Pacing needs `tc qdisc add dev <iface> root fq` on the interface or the kernel
 ignores every departure time without reporting anything; see
@@ -121,6 +130,7 @@ ignores every departure time without reporting anything; see
 - [Ancillary data](docs/metadata.md): the feature set, destination address, ECN, and writing a feature.
 - [Offload](docs/offload.md): GRO and GSO, slot sizing, and the segmentation view.
 - [Pacing](docs/pacing.md): `SO_TXTIME`, the `fq` precondition, and the rate arithmetic.
+- [Demultiplexing](docs/demux.md): the protocol boundary, key projections, the flow table, and routing.
 - [Errors](docs/errors.md): `result`, `errc`, and the pipe combinators.
 - [Integration](docs/integration.md): consuming dgram from another CMake project.
 - [Testing](docs/testing.md): the build matrix, what each suite covers, and how the fuzzing works.

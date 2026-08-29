@@ -1,0 +1,407 @@
+/**
+ * @file demux_tests.cpp
+ * @brief Keys, the flow table, and routing arrivals to protocol state.
+ */
+#include <gtest/gtest.h>
+
+#include <netinet/in.h>
+
+import std;
+import libmem;
+import dgram;
+
+namespace {
+
+using namespace std::chrono_literals;
+
+constexpr std::size_t capacity{8};
+constexpr std::size_t gro_slot{1 << 16};
+constexpr std::uint16_t mtu{1400};
+
+using rx_set = dgram::features<dgram::pktinfo, dgram::gro>;
+using tx_set = dgram::features<dgram::segment>;
+using rx_batch = dgram::receive_batch<capacity, gro_slot, rx_set>;
+using tx_batch = dgram::transmit_batch<capacity, gro_slot, tx_set>;
+
+dgram::endpoint ep(const char* text, std::uint16_t port, dgram::family fam = dgram::family::inet4) {
+    return *dgram::endpoint::parse(fam, text, port);
+}
+
+/** Records what it was given, so routing can be asserted on. */
+struct recorder {
+    std::vector<std::string> seen{};
+
+    template <typename Features> void on_datagram(const dgram::arrival<Features>& a) {
+        seen.emplace_back(reinterpret_cast<const char*>(a.payload.data()), a.payload.size());
+    }
+};
+
+/* ============================================================================
+ * Keys: hash and equality must agree exactly
+ * ============================================================================ */
+
+TEST(EndpointKey, EqualEndpointsHashEqual) {
+    EXPECT_EQ(ep("192.0.2.1", 443), ep("192.0.2.1", 443));
+    EXPECT_EQ(hash_value(ep("192.0.2.1", 443)), hash_value(ep("192.0.2.1", 443)));
+    EXPECT_EQ(std::hash<dgram::endpoint>{}(ep("192.0.2.1", 443)), hash_value(ep("192.0.2.1", 443)));
+}
+
+TEST(EndpointKey, DistinctEndpointsAreNotEqual) {
+    EXPECT_NE(ep("192.0.2.1", 443), ep("192.0.2.2", 443)) << "address";
+    EXPECT_NE(ep("192.0.2.1", 443), ep("192.0.2.1", 444)) << "port";
+    EXPECT_NE(ep("192.0.2.1", 443), ep("2001:db8::1", 443, dgram::family::inet6)) << "family";
+}
+
+/* The bug this guards: comparing whole sockaddrs also compares sin6_flowinfo,
+   which the kernel may populate. The same peer would then look like a new peer
+   on every datagram, and a demux table would fill with duplicates. */
+TEST(EndpointKey, FlowLabelIsNotIdentity) {
+    auto a{ep("2001:db8::1", 443, dgram::family::inet6)};
+    auto b{ep("2001:db8::1", 443, dgram::family::inet6)};
+    reinterpret_cast<::sockaddr_in6&>(b.mutable_storage()).sin6_flowinfo = 0x12345678;
+
+    EXPECT_EQ(a, b) << "a flow label does not identify a peer";
+    EXPECT_EQ(hash_value(a), hash_value(b)) << "the hash must agree with equality";
+}
+
+/* Scope, unlike flow label, is identity: fe80::1%eth0 is not fe80::1%eth1. */
+TEST(EndpointKey, ScopeIdIsIdentity) {
+    auto a{ep("fe80::1", 443, dgram::family::inet6)};
+    auto b{ep("fe80::1", 443, dgram::family::inet6)};
+    reinterpret_cast<::sockaddr_in6&>(b.mutable_storage()).sin6_scope_id = 3;
+
+    EXPECT_NE(a, b);
+    EXPECT_NE(hash_value(a), hash_value(b));
+}
+
+/* v4 sockaddrs carry eight bytes of sin_zero padding that must not be compared. */
+TEST(EndpointKey, V4PaddingIsNotIdentity) {
+    auto a{ep("192.0.2.1", 443)};
+    auto b{ep("192.0.2.1", 443)};
+    auto& raw{reinterpret_cast<::sockaddr_in&>(b.mutable_storage())};
+    std::memset(raw.sin_zero, 0xAB, sizeof(raw.sin_zero));
+
+    EXPECT_EQ(a, b);
+    EXPECT_EQ(hash_value(a), hash_value(b));
+}
+
+TEST(ByteKey, ComparesAndHashesByContent) {
+    const std::array<std::byte, 4> raw{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    const std::array<std::byte, 4> same{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    const std::array<std::byte, 4> other{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{5}};
+
+    const dgram::byte_key<8> a{raw};
+    const dgram::byte_key<8> b{same};
+    const dgram::byte_key<8> c{other};
+
+    EXPECT_EQ(a, b);
+    EXPECT_EQ(hash_value(a), hash_value(b));
+    EXPECT_NE(a, c);
+    EXPECT_EQ(a.bytes().size(), 4u);
+}
+
+/* ============================================================================
+ * The flow table
+ * ============================================================================ */
+
+using table_type = dgram::flow_table<dgram::peer_key, int, 64>;
+
+TEST(FlowTable, InsertFindErase) {
+    libmem::arena arena{table_type::footprint()};
+    auto t{table_type::carve(arena)};
+    ASSERT_TRUE(t.has_value());
+
+    const dgram::peer_key k{ep("192.0.2.1", 443)};
+    EXPECT_EQ(t->find(k), nullptr);
+    ASSERT_NE(t->insert(k, 7), nullptr);
+    ASSERT_NE(t->find(k), nullptr);
+    EXPECT_EQ(*t->find(k), 7);
+    EXPECT_EQ(t->size(), 1u);
+
+    EXPECT_TRUE(t->erase(k));
+    EXPECT_EQ(t->find(k), nullptr);
+    EXPECT_EQ(t->size(), 0u);
+    EXPECT_FALSE(t->erase(k)) << "erasing what is not there is not an error, just false";
+}
+
+TEST(FlowTable, InsertOverwritesWithoutGrowing) {
+    libmem::arena arena{table_type::footprint()};
+    auto t{table_type::carve(arena)};
+    ASSERT_TRUE(t.has_value());
+
+    const dgram::peer_key k{ep("192.0.2.1", 443)};
+    ASSERT_NE(t->insert(k, 1), nullptr);
+    ASSERT_NE(t->insert(k, 2), nullptr);
+    EXPECT_EQ(*t->find(k), 2);
+    EXPECT_EQ(t->size(), 1u);
+}
+
+TEST(FlowTable, RefusesInsertAtCapacity) {
+    libmem::arena arena{table_type::footprint()};
+    auto t{table_type::carve(arena)};
+    ASSERT_TRUE(t.has_value());
+
+    for (std::size_t i{}; i < table_type::max_size; ++i) {
+        const dgram::peer_key k{ep("192.0.2.1", static_cast<std::uint16_t>(1000 + i))};
+        ASSERT_NE(t->insert(k, static_cast<int>(i)), nullptr) << "at " << i;
+    }
+    EXPECT_TRUE(t->full());
+    EXPECT_EQ(t->size(), table_type::max_size);
+
+    const dgram::peer_key overflow{ep("198.51.100.1", 1)};
+    EXPECT_EQ(t->insert(overflow, 0), nullptr) << "a full table refuses rather than degrading";
+    EXPECT_EQ(t->find(overflow), nullptr);
+
+    // Everything inserted before the refusal must still be findable.
+    for (std::size_t i{}; i < table_type::max_size; ++i) {
+        const dgram::peer_key k{ep("192.0.2.1", static_cast<std::uint16_t>(1000 + i))};
+        ASSERT_NE(t->find(k), nullptr) << "lost entry " << i;
+        EXPECT_EQ(*t->find(k), static_cast<int>(i));
+    }
+}
+
+/* Backward-shift deletion means no tombstones, so heavy churn must not degrade
+   the table or lose entries whose probe chain crossed a removed slot. */
+TEST(FlowTable, SurvivesHeavyChurn) {
+    libmem::arena arena{table_type::footprint()};
+    auto t{table_type::carve(arena)};
+    ASSERT_TRUE(t.has_value());
+
+    std::mt19937 rng{12345};
+    std::map<std::uint16_t, int> reference{};
+
+    for (int round{}; round < 20'000; ++round) {
+        const auto port{static_cast<std::uint16_t>(1 + (rng() % 200))};
+        const dgram::peer_key k{ep("192.0.2.1", port)};
+
+        if ((rng() % 3) == 0) {
+            const bool erased{t->erase(k)};
+            EXPECT_EQ(erased, reference.erase(port) == 1) << "round " << round;
+        } else if (reference.size() < table_type::max_size || reference.contains(port)) {
+            const int value{static_cast<int>(rng())};
+            ASSERT_NE(t->insert(k, value), nullptr) << "round " << round;
+            reference[port] = value;
+        }
+        ASSERT_EQ(t->size(), reference.size()) << "round " << round;
+    }
+
+    for (const auto& [port, value] : reference) {
+        const dgram::peer_key k{ep("192.0.2.1", port)};
+        ASSERT_NE(t->find(k), nullptr) << "port " << port;
+        EXPECT_EQ(*t->find(k), value);
+    }
+}
+
+TEST(FlowTable, EntriesViewSeesEveryLiveFlow) {
+    libmem::arena arena{table_type::footprint()};
+    auto t{table_type::carve(arena)};
+    ASSERT_TRUE(t.has_value());
+
+    for (int i{}; i < 10; ++i) {
+        ASSERT_NE(t->insert(dgram::peer_key{ep("192.0.2.1", static_cast<std::uint16_t>(100 + i))}, i), nullptr);
+    }
+    EXPECT_TRUE(t->erase(dgram::peer_key{ep("192.0.2.1", 105)}));
+
+    std::vector<int> values{};
+    for (const auto& [key, value] : t->entries()) {
+        values.push_back(value);
+    }
+    std::ranges::sort(values);
+    EXPECT_EQ(values, (std::vector<int>{0, 1, 2, 3, 4, 6, 7, 8, 9}));
+}
+
+TEST(FlowTable, CarveFailsCleanlyOnASmallArena) {
+    libmem::arena arena{64};
+    EXPECT_FALSE(table_type::carve(arena).has_value());
+}
+
+/* ============================================================================
+ * Projections
+ * ============================================================================ */
+
+template <typename Features = dgram::no_features>
+dgram::arrival<Features> make_arrival(std::span<const std::byte> payload, const dgram::endpoint& from, const dgram::metadata<Features>& meta) {
+    return {payload, from, meta, 0ns};
+}
+
+TEST(Projection, ByPeerKeysOnTheSender) {
+    const dgram::metadata<dgram::no_features> meta{};
+    const auto from{ep("192.0.2.9", 5000)};
+    const auto key{dgram::by_peer{}(make_arrival({}, from, meta))};
+    ASSERT_TRUE(key.has_value());
+    EXPECT_EQ(key->remote, from);
+}
+
+/* The QUIC-shaped case: a connection id at a fixed offset, which survives the
+   peer changing address in a way the 4-tuple does not. */
+TEST(Projection, ByPayloadIdReadsTheIdentifier) {
+    std::array<std::byte, 16> payload{};
+    for (auto [i, b] : std::views::enumerate(payload)) {
+        b = static_cast<std::byte>(i);
+    }
+    const dgram::metadata<dgram::no_features> meta{};
+    const auto from{ep("192.0.2.9", 5000)};
+
+    const dgram::by_payload_id<1, 8> projection{};
+    const auto key{projection(make_arrival(payload, from, meta))};
+    ASSERT_TRUE(key.has_value());
+    ASSERT_EQ(key->bytes().size(), 8u);
+    EXPECT_EQ(key->bytes()[0], std::byte{1}) << "reads from the given offset";
+    EXPECT_EQ(key->bytes()[7], std::byte{8});
+}
+
+TEST(Projection, ByPayloadIdDeclinesAShortDatagram) {
+    const dgram::metadata<dgram::no_features> meta{};
+    const auto from{ep("192.0.2.9", 5000)};
+    const dgram::by_payload_id<1, 8> projection{};
+
+    std::array<std::byte, 4> too_short{};
+    EXPECT_FALSE(projection(make_arrival(too_short, from, meta)).has_value()) << "must decline, not read past the end";
+    EXPECT_FALSE(projection(make_arrival({}, from, meta)).has_value());
+
+    std::array<std::byte, 9> exactly_enough{};
+    EXPECT_TRUE(projection(make_arrival(exactly_enough, from, meta)).has_value());
+}
+
+/* ============================================================================
+ * Routing over the wire
+ * ============================================================================ */
+
+struct fixture {
+    libmem::arena arena{rx_batch::footprint() + tx_batch::footprint() + 4096};
+    dgram::socket receiver{std::move(
+        *dgram::socket::open<dgram::reuse_addr, dgram::recv_buffer<1 << 21>, dgram::receive_metadata<dgram::pktinfo, dgram::gro>>(dgram::family::inet4))};
+    dgram::endpoint target{};
+
+    fixture() {
+        EXPECT_TRUE(receiver.bind(dgram::endpoint::any(dgram::family::inet4, 0)).has_value());
+        target = ep("127.0.0.1", receiver.local_address()->port());
+    }
+};
+
+TEST(Route, DeliversToTheMatchingFlowAndReportsTheRest) {
+    fixture net{};
+    auto rx{rx_batch::carve(net.arena)};
+    auto tx{tx_batch::carve(net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    auto known{dgram::socket::open<>(dgram::family::inet4)};
+    auto stranger{dgram::socket::open<>(dgram::family::inet4)};
+    ASSERT_TRUE(known.has_value() && stranger.has_value());
+    ASSERT_TRUE(known->bind(dgram::endpoint::any(dgram::family::inet4, 0)).has_value());
+    ASSERT_TRUE(stranger->bind(dgram::endpoint::any(dgram::family::inet4, 0)).has_value());
+
+    using rec_table = dgram::flow_table<dgram::peer_key, recorder*, 64>;
+    libmem::arena table_arena{rec_table::footprint()};
+    auto table{rec_table::carve(table_arena)};
+    ASSERT_TRUE(table.has_value());
+
+    recorder sink{};
+    const dgram::peer_key known_key{ep("127.0.0.1", known->local_address()->port())};
+    ASSERT_NE(table->insert(known_key, &sink), nullptr);
+
+    const auto say = [&](dgram::socket& s, std::string_view text) {
+        ASSERT_TRUE(tx->stage_copy({reinterpret_cast<const std::byte*>(text.data()), text.size()}, net.target));
+        ASSERT_TRUE(tx->flush(s).has_value());
+    };
+    say(*known, "from-known");
+    say(*stranger, "from-stranger");
+
+    std::size_t received{};
+    for (int attempt{}; attempt < 100 && received < 2; ++attempt) {
+        const auto got{rx->receive(net.receiver)};
+        if (!got) {
+            continue;
+        }
+        received += *got;
+
+        std::vector<std::string> unmatched{};
+        const auto counts{dgram::route(*rx, dgram::by_peer{}, *table, 0ns,
+            [&](const auto& a, const auto&) { unmatched.emplace_back(reinterpret_cast<const char*>(a.payload.data()), a.payload.size()); })};
+        EXPECT_EQ(counts.delivered + counts.unmatched, *got);
+        for (const auto& text : unmatched) {
+            EXPECT_EQ(text, "from-stranger");
+        }
+    }
+
+    ASSERT_EQ(received, 2u);
+    EXPECT_EQ(sink.seen, (std::vector<std::string>{"from-known"})) << "only the known peer's datagram reaches the sink";
+}
+
+/* The case slot-level dispatch silently gets wrong: one GRO slot holding
+   datagrams that belong to different flows. */
+TEST(Route, CoalescedSlotRoutesPerDatagramNotPerSlot) {
+    fixture net{};
+    auto rx{rx_batch::carve(net.arena)};
+    auto tx{tx_batch::carve(net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    auto sender{dgram::socket::open<>(dgram::family::inet4)};
+    ASSERT_TRUE(sender.has_value());
+    ASSERT_TRUE(sender->bind(dgram::endpoint::any(dgram::family::inet4, 0)).has_value());
+
+    // Key on a byte inside the payload, so datagrams from one peer can belong to
+    // different flows: exactly the QUIC connection-id shape.
+    using id_table = dgram::flow_table<dgram::byte_key<1>, recorder*, 64>;
+    libmem::arena table_arena{id_table::footprint()};
+    auto table{id_table::carve(table_arena)};
+    ASSERT_TRUE(table.has_value());
+
+    recorder alpha{};
+    recorder beta{};
+    const auto key_of = [](std::byte id) { return dgram::byte_key<1>{std::span<const std::byte>{&id, 1}}; };
+    ASSERT_NE(table->insert(key_of(std::byte{'A'}), &alpha), nullptr);
+    ASSERT_NE(table->insert(key_of(std::byte{'B'}), &beta), nullptr);
+
+    // Four segments, alternating connection ids, in one GSO write.
+    constexpr std::size_t segments{4};
+    std::vector<std::byte> payload(segments * mtu);
+    for (std::size_t s{}; s < segments; ++s) {
+        payload[s * mtu] = (s % 2 == 0) ? std::byte{'A'} : std::byte{'B'};
+    }
+
+    dgram::control<tx_set> ancillary{};
+    ancillary.set<dgram::segment>(mtu);
+    ASSERT_TRUE(tx->stage(payload, net.target, ancillary));
+    ASSERT_TRUE(tx->flush(*sender).has_value());
+
+    ASSERT_EQ(*rx->receive(net.receiver), 1u) << "GRO should coalesce into one slot";
+    {
+        const auto view{rx->datagrams()};
+        ASSERT_TRUE((*view.begin()).meta().get<dgram::gro>().has_value()) << "test is meaningless without coalescing";
+    }
+
+    const auto counts{dgram::route(*rx, dgram::by_payload_id<0, 1>{}, *table, 0ns)};
+    EXPECT_EQ(counts.delivered, segments) << "each datagram in the slot must be routed on its own key";
+    EXPECT_EQ(counts.unmatched, 0u);
+    EXPECT_EQ(alpha.seen.size(), 2u);
+    EXPECT_EQ(beta.seen.size(), 2u);
+}
+
+TEST(Route, TruncatedDatagramsAreCountedNotDelivered) {
+    using tiny_rx = dgram::receive_batch<capacity, 8, rx_set>;
+    fixture net{};
+    auto rx{tiny_rx::carve(net.arena)};
+    auto tx{tx_batch::carve(net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    auto sender{dgram::socket::open<>(dgram::family::inet4)};
+    ASSERT_TRUE(sender.has_value());
+
+    using rec_table = dgram::flow_table<dgram::peer_key, recorder*, 64>;
+    libmem::arena table_arena{rec_table::footprint()};
+    auto table{rec_table::carve(table_arena)};
+    ASSERT_TRUE(table.has_value());
+
+    constexpr std::string_view text{"far longer than eight bytes"};
+    ASSERT_TRUE(tx->stage_copy({reinterpret_cast<const std::byte*>(text.data()), text.size()}, net.target));
+    ASSERT_TRUE(tx->flush(*sender).has_value());
+
+    ASSERT_EQ(*rx->receive(net.receiver), 1u);
+    const auto counts{dgram::route(*rx, dgram::by_peer{}, *table, 0ns)};
+    EXPECT_EQ(counts.dropped, 1u) << "a truncated datagram must never reach a protocol";
+    EXPECT_EQ(counts.delivered, 0u);
+    EXPECT_EQ(counts.unmatched, 0u);
+}
+
+} // namespace

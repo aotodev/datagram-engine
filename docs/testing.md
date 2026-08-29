@@ -21,6 +21,7 @@ checkout.
 | `metadata_tests.cpp` | Destination address and ECN over loopback, both families, including a feature that was never enabled and an undersized control buffer. |
 | `malformed_control_tests.cpp` | Control buffers the kernel would never write. Every case here was found by the fuzzer first. |
 | `offload_tests.cpp` | GRO and GSO over loopback, and the segmentation walk on its own: short tail, exact multiple, stride of zero, stride past the end, empty payload. |
+| `demux_tests.cpp` | Key equality and hash agreement (including the flow-label and padding cases), the flow table under churn and at capacity, projections, and routing a GRO slot whose datagrams belong to different flows. |
 | `pacing_tests.cpp` | The rate arithmetic exhaustively (monotonicity, drift, extreme rates, constexpr), plus what the kernel side allows unprivileged. Real pacing needs `fq` and `CAP_NET_ADMIN`, so no test here asserts a datagram was actually delayed. |
 | `concurrency_tests.cpp` | Several workers, each with its own socket, arena and batches, running concurrently. Meaningful only under `-s thread`. |
 
@@ -57,6 +58,12 @@ arithmetic.
 control message. It asserts the properties a wrong stride would break: every
 segment lies inside the buffer, segments are contiguous and ordered, and together
 they cover the payload exactly once.
+
+`fuzz_demux` drives the payload key projection, which reads bytes at an offset
+out of an attacker-supplied datagram, and drives the flow table differentially
+against a reference map. The table is not attacker-facing, but its probe chains
+and backward-shift deletion are index arithmetic that can be wrong in one corner
+and right everywhere else.
 
 ```sh
 scripts/make.sh -f                                   # standalone driver, runs under ctest

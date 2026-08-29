@@ -88,6 +88,33 @@ public:
     }
 
     [[nodiscard]] const ::sockaddr* raw() const noexcept { return reinterpret_cast<const ::sockaddr*>(&storage_); }
+
+    /**
+     * @brief The address itself: 4 bytes for v4, 16 for v6, empty if unspecified.
+     *
+     * The identity-bearing part. `sockaddr_storage` also carries `sin_zero`
+     * padding and, for v6, a `sin6_flowinfo` the kernel may or may not populate;
+     * neither identifies a peer, so neither belongs in a comparison or a hash.
+     */
+    [[nodiscard]] std::span<const std::byte> address_bytes() const noexcept {
+        if (is_v4()) {
+            const auto& v4{reinterpret_cast<const ::sockaddr_in&>(storage_)};
+            return {reinterpret_cast<const std::byte*>(&v4.sin_addr), sizeof(v4.sin_addr)};
+        }
+        if (is_v6()) {
+            const auto& v6{reinterpret_cast<const ::sockaddr_in6&>(storage_)};
+            return {reinterpret_cast<const std::byte*>(&v6.sin6_addr), sizeof(v6.sin6_addr)};
+        }
+        return {};
+    }
+
+    /**
+     * @brief IPv6 scope id, zero for v4.
+     *
+     * Part of the identity: `fe80::1%eth0` and `fe80::1%eth1` are different
+     * destinations. `sin6_flowinfo`, which sits beside it, is not.
+     */
+    [[nodiscard]] std::uint32_t scope_id() const noexcept { return is_v6() ? reinterpret_cast<const ::sockaddr_in6&>(storage_).sin6_scope_id : 0U; }
     [[nodiscard]] ::sockaddr_storage& mutable_storage() noexcept { return storage_; }
 
     /** @brief Render as `addr:port`, or `[addr]:port` for IPv6. */
@@ -103,12 +130,41 @@ public:
         return std::format("[{}]:{}", buf.data(), port());
     }
 
-    /** @brief Byte-wise equality over the significant prefix only. */
+    /**
+     * @brief Equality over family, port, address and scope, and nothing else.
+     *
+     * Deliberately not a `memcmp` of the whole `sockaddr`: that would compare
+     * `sin_zero` padding on v4 and `sin6_flowinfo` on v6. Flow labels are not
+     * identity, and a peer whose flowinfo the kernel filled in would otherwise
+     * look like a different peer on every datagram.
+     */
     [[nodiscard]] friend bool operator==(const endpoint& a, const endpoint& b) noexcept {
-        if (a.storage_.ss_family != b.storage_.ss_family) {
+        if (a.storage_.ss_family != b.storage_.ss_family || a.port() != b.port() || a.scope_id() != b.scope_id()) {
             return false;
         }
-        return std::memcmp(&a.storage_, &b.storage_, a.size()) == 0;
+        return std::ranges::equal(a.address_bytes(), b.address_bytes());
+    }
+
+    /** @brief Hash over exactly the fields `operator==` compares. */
+    [[nodiscard]] friend std::size_t hash_value(const endpoint& e) noexcept {
+        // FNV-1a: no allocation, no table, and adequate for a demux key.
+        std::uint64_t h{0xCBF29CE484222325ULL};
+        const auto mix = [&h](const std::uint8_t byte) noexcept {
+            h ^= byte;
+            h *= 0x100000001B3ULL;
+        };
+        mix(static_cast<std::uint8_t>(e.storage_.ss_family));
+        const auto port{e.port()};
+        mix(static_cast<std::uint8_t>(port));
+        mix(static_cast<std::uint8_t>(port >> 8));
+        for (const auto byte : e.address_bytes()) {
+            mix(static_cast<std::uint8_t>(byte));
+        }
+        const auto scope{e.scope_id()};
+        for (int shift{}; shift < 32; shift += 8) {
+            mix(static_cast<std::uint8_t>(scope >> shift));
+        }
+        return h;
     }
 
 private:
@@ -118,3 +174,10 @@ private:
 static_assert(std::is_trivially_destructible_v<endpoint>);
 
 } // namespace dgram
+
+/** @brief So an `endpoint` can key a standard container as well as ours. */
+template <> struct std::hash<dgram::endpoint> {
+    [[nodiscard]] std::size_t operator()(const dgram::endpoint& e) const noexcept { return hash_value(e); }
+};
+
+namespace dgram {} // namespace dgram

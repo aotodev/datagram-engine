@@ -8,12 +8,17 @@
  */
 module;
 
+// Blank lines matter here: clang-format sorts within a contiguous block, so
+// these stay separate blocks to keep <time.h> ahead of <linux/errqueue.h>,
+// which declares a `struct timespec[3]` member and does not include it itself.
 #include <cerrno>
-#include <linux/errqueue.h>
-#include <linux/net_tstamp.h>
+#include <time.h>
+
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <time.h> // must precede linux/errqueue.h, which uses struct timespec
+
+#include <linux/errqueue.h>
+#include <linux/net_tstamp.h>
 
 export module dgram:pacing;
 
@@ -75,7 +80,9 @@ export template <txtime_clock Clock = txtime_clock::monotonic, bool Deadline = f
     [[nodiscard]] static result<> apply(const int fd, family) noexcept {
         ::sock_txtime config{};
         config.clockid = static_cast<::__kernel_clockid_t>(Clock);
-        config.flags = (Deadline ? SOF_TXTIME_DEADLINE_MODE : 0U) | (ReportErrors ? SOF_TXTIME_REPORT_ERRORS : 0U);
+        constexpr std::uint32_t deadline_bit{Deadline ? std::uint32_t{SOF_TXTIME_DEADLINE_MODE} : 0U};
+        constexpr std::uint32_t report_bit{ReportErrors ? std::uint32_t{SOF_TXTIME_REPORT_ERRORS} : 0U};
+        config.flags = deadline_bit | report_bit;
         if (::setsockopt(fd, SOL_SOCKET, SO_TXTIME, &config, static_cast<::socklen_t>(sizeof(config))) < 0) [[unlikely]] {
             return fail<>();
         }

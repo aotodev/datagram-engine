@@ -178,4 +178,46 @@ static_assert(dgram::socket_option<dgram::reuse_port>);
 static_assert(dgram::socket_option<dgram::nonblocking>);
 static_assert(dgram::socket_option<dgram::receive_metadata<dgram::pktinfo, dgram::ecn>>);
 
+/* ============================================================================
+ * Demultiplexing
+ * ============================================================================ */
+
+static_assert(dgram::demux_key<dgram::peer_key>);
+static_assert(dgram::demux_key<dgram::flow_key>);
+static_assert(dgram::demux_key<dgram::byte_key<20>>);
+
+/* A key must be trivially destructible: the table never runs a destructor. */
+static_assert(std::is_trivially_destructible_v<dgram::byte_key<20>>);
+static_assert(std::is_trivially_destructible_v<dgram::flow_key>);
+
+using demux_table_type = dgram::flow_table<dgram::peer_key, int, 64>;
+static_assert(dgram::flow_lookup<demux_table_type, dgram::peer_key, int>);
+static_assert(demux_table_type::max_size == 56, "seven eighths of the slots, so probing stays bounded");
+static_assert(demux_table_type::max_size < 64, "an open-addressed table must never be allowed to fill");
+
+/* A sink is anything that can take an arrival, and nothing more. */
+struct minimal_sink {
+    void on_datagram(const dgram::arrival<dgram::no_features>&) {}
+};
+static_assert(dgram::datagram_sink<minimal_sink, dgram::no_features>);
+struct not_a_sink {};
+static_assert(!dgram::datagram_sink<not_a_sink, dgram::no_features>);
+
+/* by_flow needs the local address, so it is only available when pktinfo is in
+   the feature set. Keying on an unspecified local address would silently
+   collapse every local address into one flow. */
+template <typename Features>
+concept flow_keyable = requires(const dgram::by_flow& p, const dgram::arrival<Features>& a) { p(a); };
+
+static_assert(flow_keyable<dgram::features<dgram::pktinfo>>);
+static_assert(!flow_keyable<dgram::no_features>, "the 4-tuple needs pktinfo");
+static_assert(flow_keyable<both>);
+
+/* by_peer and by_payload_id work with any feature set: neither reads metadata. */
+template <typename Features, typename Projection>
+concept projects = requires(const Projection& p, const dgram::arrival<Features>& a) { p(a); };
+
+static_assert(projects<dgram::no_features, dgram::by_peer>);
+static_assert(projects<dgram::no_features, dgram::by_payload_id<0, 8>>);
+
 } // namespace

@@ -66,6 +66,7 @@ target_sources(dgram
       src/dgram/metadata.cppm
       src/dgram/offload.cppm
       src/dgram/pacing.cppm
+      src/dgram/demux.cppm
       src/dgram/batch.cppm
       src/dgram/dgram.cppm
 )
