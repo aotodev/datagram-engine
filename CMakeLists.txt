@@ -18,6 +18,7 @@ endif()
 option(DGRAM_BUILD_TESTS    "Build unit tests"       OFF)
 option(DGRAM_BUILD_EXAMPLES "Build examples"         OFF)
 option(USE_SANITIZERS       "Enable ASan/UBSan"      OFF)
+option(DGRAM_CONTRACTS      "Enable C++26 contract checks" ON)
 
 if(PROJECT_IS_TOP_LEVEL)
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -60,14 +61,23 @@ target_sources(dgram
   PUBLIC
     FILE_SET CXX_MODULES FILES
       src/dgram/error.cppm
-      src/dgram/feature.cppm
+      src/dgram/cmsg.cppm
       src/dgram/address.cppm
       src/dgram/socket.cppm
+      src/dgram/feature.cppm
+      src/dgram/metadata.cppm
       src/dgram/batch.cppm
       src/dgram/dgram.cppm
 )
 
 target_link_libraries(dgram PUBLIC libmem)
+
+# Contracts live in non-template functions compiled here, so a consumer needs no
+# -fcontracts of its own; it does need the violation handler at link time.
+if(DGRAM_CONTRACTS)
+    target_compile_options(dgram PRIVATE -fcontracts -fcontract-evaluation-semantic=enforce)
+    target_link_libraries(dgram PUBLIC stdc++exp)
+endif()
 
 add_library(dgram_flags INTERFACE)
 target_compile_options(dgram_flags INTERFACE

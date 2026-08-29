@@ -15,6 +15,7 @@ import std;
 import libmem;
 
 import :address;
+import :cmsg;
 import :error;
 import :feature;
 import :socket;
@@ -66,16 +67,28 @@ export struct layout {
  * @brief One received datagram, borrowed from the batch that received it.
  *
  * Valid until the next `receive` on that batch. A protocol that needs the bytes
- * for longer copies them or retains the slot.
+ * for longer copies them.
  */
-export class datagram {
+export template <feature_set Features = no_features> class datagram {
 public:
-    constexpr datagram(const std::span<const std::byte> payload, const endpoint& from, const int flags) noexcept
-        : payload_{payload}, from_{&from}, flags_{flags} {}
+    explicit constexpr datagram(const ::mmsghdr& raw) noexcept : raw_{&raw} {}
 
-    [[nodiscard]] constexpr std::span<const std::byte> payload() const noexcept { return payload_; }
-    [[nodiscard]] constexpr const endpoint& from() const noexcept { return *from_; }
-    [[nodiscard]] constexpr int flags() const noexcept { return flags_; }
+    [[nodiscard]] std::span<const std::byte> payload() const noexcept {
+        return {static_cast<const std::byte*>(raw_->msg_hdr.msg_iov[0].iov_base), raw_->msg_len};
+    }
+
+    [[nodiscard]] const endpoint& from() const noexcept { return *static_cast<const endpoint*>(raw_->msg_hdr.msg_name); }
+
+    [[nodiscard]] constexpr int flags() const noexcept { return raw_->msg_hdr.msg_flags; }
+
+    /**
+     * @brief Parse this datagram's ancillary data.
+     *
+     * Walks the control buffer on each call rather than eagerly after `receive`,
+     * so a caller that never asks pays nothing. Bind the result if you need it
+     * more than once.
+     */
+    [[nodiscard]] metadata<Features> meta() const noexcept { return detail::parse_control<Features>(raw_->msg_hdr); }
 
     /**
      * @brief Payload did not fit the slot and the excess is gone.
@@ -83,34 +96,36 @@ public:
      * The kernel reports this no other way, so ignoring it turns an undersized
      * `slot_bytes` into silent corruption.
      */
-    [[nodiscard]] constexpr bool truncated() const noexcept { return (flags_ & MSG_TRUNC) != 0; }
+    [[nodiscard]] constexpr bool truncated() const noexcept { return (flags() & MSG_TRUNC) != 0; }
 
     /** @brief Ancillary data did not fit: the control buffer is undersized for the feature set. */
-    [[nodiscard]] constexpr bool control_truncated() const noexcept { return (flags_ & MSG_CTRUNC) != 0; }
+    [[nodiscard]] constexpr bool control_truncated() const noexcept { return (flags() & MSG_CTRUNC) != 0; }
 
     /** @brief Neither payload nor control data was lost. */
-    [[nodiscard]] constexpr bool intact() const noexcept { return (flags_ & (MSG_TRUNC | MSG_CTRUNC)) == 0; }
+    [[nodiscard]] constexpr bool intact() const noexcept { return (flags() & (MSG_TRUNC | MSG_CTRUNC)) == 0; }
 
 private:
-    std::span<const std::byte> payload_;
-    const endpoint* from_;
-    int flags_;
+    const ::mmsghdr* raw_;
 };
+
+/**
+ * @brief Predicates over a datagram, usable as range adaptors.
+ *
+ * `datagram` is templated on the feature set, so a member pointer would have to
+ * name that set at every call site. These do not.
+ */
+export inline constexpr auto is_intact = [](const auto& d) static noexcept { return d.intact(); };
+export inline constexpr auto is_truncated = [](const auto& d) static noexcept { return d.truncated(); };
+export inline constexpr auto is_control_truncated = [](const auto& d) static noexcept { return d.control_truncated(); };
 
 namespace detail {
 
 /** @brief Stateless projection from a kernel-filled `mmsghdr` to a `datagram`. */
-struct to_datagram_fn {
-    [[nodiscard]] constexpr datagram operator()(const ::mmsghdr& m) const noexcept {
-        return datagram{
-            std::span{static_cast<const std::byte*>(m.msg_hdr.msg_iov[0].iov_base), m.msg_len},
-            *static_cast<const endpoint*>(m.msg_hdr.msg_name),
-            m.msg_hdr.msg_flags,
-        };
-    }
+template <feature_set Features> struct to_datagram_fn {
+    [[nodiscard]] constexpr datagram<Features> operator()(const ::mmsghdr& m) const noexcept { return datagram<Features>{m}; }
 };
 
-inline constexpr to_datagram_fn to_datagram{};
+template <feature_set Features> inline constexpr to_datagram_fn<Features> to_datagram{};
 
 /**
  * @brief Carve `count` objects out of `r`, empty if it is exhausted.
@@ -211,7 +226,9 @@ public:
     }
 
     /** @brief Lazy view over the datagrams the last `receive` produced. */
-    [[nodiscard]] auto datagrams() const noexcept { return std::span<const ::mmsghdr>{msgs_.data(), received_} | std::views::transform(detail::to_datagram); }
+    [[nodiscard]] auto datagrams() const noexcept {
+        return std::span<const ::mmsghdr>{msgs_.data(), received_} | std::views::transform(detail::to_datagram<Features>);
+    }
 
     [[nodiscard]] constexpr std::size_t received() const noexcept { return received_; }
 
@@ -322,7 +339,22 @@ public:
      * @brief Queue `payload` for `to`, referencing the bytes in place.
      * @return `false` if the batch is already full.
      */
-    [[nodiscard]] bool stage(const std::span<const std::byte> payload, const endpoint& to) noexcept {
+    [[nodiscard]] bool stage(const std::span<const std::byte> payload, const endpoint& to) noexcept { return stage(payload, to, control<Features>{}); }
+
+    /**
+     * @brief Queue `payload` for `to` with ancillary data attached.
+     *
+     * The control block is built per datagram and `msg_controllen` set to
+     * exactly what was written, zero included. Leaving a stale length from an
+     * earlier flush would have the kernel read whatever that datagram left
+     * behind, which is the transmit mirror of the receive-side rearm.
+     *
+     * The family for the build step comes from `to`, so a dual-stack socket
+     * sending to both families emits the right level and type per datagram.
+     *
+     * @return `false` if the batch is already full.
+     */
+    [[nodiscard]] bool stage(const std::span<const std::byte> payload, const endpoint& to, const control<Features>& ancillary) noexcept {
         if (full()) [[unlikely]] {
             return false;
         }
@@ -332,7 +364,7 @@ public:
         iovs_[i].iov_base = const_cast<std::byte*>(payload.data());
         iovs_[i].iov_len = payload.size();
         msgs_[i].msg_hdr.msg_namelen = to.size();
-        msgs_[i].msg_hdr.msg_controllen = 0;
+        msgs_[i].msg_hdr.msg_controllen = build_control(i, to, ancillary);
         msgs_[i].msg_len = 0;
         return true;
     }
@@ -341,7 +373,7 @@ public:
      * @brief Queue a copy of `payload`, for bytes that will not outlive the flush.
      * @return `false` if the batch is full or the payload exceeds `SlotBytes`.
      */
-    [[nodiscard]] bool stage_copy(const std::span<const std::byte> payload, const endpoint& to) noexcept
+    [[nodiscard]] bool stage_copy(const std::span<const std::byte> payload, const endpoint& to, const control<Features>& ancillary = {}) noexcept
         requires(SlotBytes > 0)
     {
         if (full() || payload.size() > SlotBytes) [[unlikely]] {
@@ -349,7 +381,7 @@ public:
         }
         const auto dest{payload_.subspan(staged_ * SlotBytes, payload.size())};
         std::ranges::copy(payload, dest.begin());
-        return stage(dest, to);
+        return stage(dest, to, ancillary);
     }
 
     /**
@@ -373,6 +405,16 @@ public:
 
 private:
     transmit_batch() noexcept = default;
+
+    /** @brief Build slot `i`'s control block, returning the bytes `msg_controllen` must take. */
+    [[nodiscard]] std::size_t build_control(const std::size_t i, const endpoint& to, const control<Features>& ancillary) noexcept {
+        if constexpr (Features::control_space == 0) {
+            return 0;
+        } else {
+            const std::span<std::byte, Features::control_space> block{control_.data() + (i * Features::control_space), Features::control_space};
+            return ancillary.build_into(block, to.is_v4() ? family::inet4 : family::inet6);
+        }
+    }
 
     void wire() noexcept {
         for (auto [i, m] : std::views::enumerate(msgs_)) {

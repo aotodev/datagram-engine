@@ -84,11 +84,11 @@ TEST(Loopback, DeliversAWholeBatch) {
     ASSERT_TRUE(got.has_value());
     EXPECT_EQ(*got, sent_count);
 
-    const auto texts{rx->datagrams() | std::views::transform([](const dgram::datagram& d) {
+    const auto texts{rx->datagrams() | std::views::transform([](const auto& d) {
         return std::string{reinterpret_cast<const char*>(d.payload().data()), d.payload().size()};
     }) | std::ranges::to<std::vector>()};
     EXPECT_TRUE(std::ranges::equal(texts, payloads));
-    EXPECT_TRUE(std::ranges::all_of(rx->datagrams(), &dgram::datagram::intact));
+    EXPECT_TRUE(std::ranges::all_of(rx->datagrams(), dgram::is_intact));
 }
 
 // The trap this whole design exists around: reusing a wired batch must not

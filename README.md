@@ -19,6 +19,7 @@ not.
 | `receive_batch` | `recvmmsg` argument block carved from a resource, plus a lazy view over what arrived. |
 | `transmit_batch` | `sendmmsg` argument block. Stages by reference, so echoing costs no copy. |
 | `features` | Compile-time set of ancillary-data features; the control buffer is sized as the sum over it. |
+| `pktinfo` / `ecn` | Which local address a datagram arrived on, and its ECN marking. Both families. |
 | `result` | `std::expected` over `errno`, with left-to-right pipe combinators. |
 
 ## What makes it different
@@ -52,6 +53,13 @@ for (const auto& d : batch->datagrams() | std::views::filter(&dgram::datagram::i
 `CMSG_SPACE` term, its parse step and its build step from one declaration, so the
 control buffer cannot fall out of step with what the parser expects.
 
+```cpp
+using metadata_set = dgram::features<dgram::pktinfo, dgram::ecn>;
+
+const auto meta{d.meta()};
+if (const auto marking{meta.get<dgram::ecn>()}) { reply.set<dgram::ecn>(*marking); }
+```
+
 ## Building
 
 Needs GCC >= 16, CMake >= 3.30 and Ninja. Linux only.
@@ -67,12 +75,14 @@ ctest --test-dir build --output-on-failure
 
 ## Status
 
-Phase 1 (memory model and the batching syscalls) is done and tested. Phases 2 to
-5, covering ancillary data, GRO/GSO, pacing and demultiplexing, are in progress.
+Phases 1 and 2 are done and tested: the memory model, the batching syscalls, and
+ancillary data (destination address and ECN, both families). Phases 3 to 5,
+covering GRO/GSO, pacing and demultiplexing, are in progress.
 
 ## Docs
 
 - [Sockets](docs/sockets.md): `socket`, `endpoint`, and the option set.
 - [Batches](docs/batches.md): sizing, carving, receiving, transmitting, and the borrow contract.
+- [Ancillary data](docs/metadata.md): the feature set, destination address, ECN, and writing a feature.
 - [Errors](docs/errors.md): `result`, `errc`, and the pipe combinators.
 - [Integration](docs/integration.md): consuming dgram from another CMake project.

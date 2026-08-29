@@ -42,9 +42,13 @@ nothing.
 
 ## Options
 
-An option is a type with `static result<> apply(int fd)`, described by the
-`socket_option` concept. They are applied in the order written, which matters:
-`SO_REUSEPORT` has to precede `bind`.
+An option is a type with `static result<> apply(int fd, family)`, described by
+the `socket_option` concept. They are applied in the order written, which
+matters: `SO_REUSEPORT` has to precede `bind`.
+
+The family is passed in because the same intent needs a different option per
+family: enabling destination-address reporting is `IP_PKTINFO` on a v4 socket and
+`IPV6_RECVPKTINFO` on a v6 one. An option that does not care ignores it.
 
 | Option | Effect |
 |--------|--------|
@@ -53,7 +57,8 @@ An option is a type with `static result<> apply(int fd)`, described by the
 | `nonblocking` | `O_NONBLOCK`. A receive with nothing queued returns `would_block`. |
 | `recv_buffer<Bytes>` | `SO_RCVBUF`. The kernel doubles the request and caps it at `net.core.rmem_max`. |
 | `send_buffer<Bytes>` | `SO_SNDBUF`. Doubled and capped likewise. |
-| `v6_only` | `IPV6_V6ONLY`. Worth setting explicitly when both families are bound separately, because the default is a sysctl. |
+| `v6_only` | `IPV6_V6ONLY`. Worth setting explicitly when both families are bound separately, because the default is a sysctl. Fails with `invalid_argument` on a v4 socket. |
+| `receive_metadata<Fs...>` | Ask the kernel to report each feature's control message. See [metadata](metadata.md). |
 
 ```cpp
 auto sock{dgram::socket::open<dgram::reuse_port,
@@ -64,6 +69,6 @@ Writing your own is one static function:
 
 ```cpp
 struct my_option {
-    static dgram::result<> apply(int fd) noexcept { /* setsockopt */ }
+    static dgram::result<> apply(int fd, dgram::family fam) noexcept { /* setsockopt */ }
 };
 ```

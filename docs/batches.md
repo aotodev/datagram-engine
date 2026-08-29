@@ -16,6 +16,8 @@ class transmit_batch;
 `Capacity` is datagrams per syscall and must be in `(0, IOV_MAX]`. `SlotBytes` is
 payload bytes per datagram; a receive batch requires it to be non-zero, a
 transmit batch treats zero as "reference only, carve no payload memory".
+`Features` is the ancillary-data set, which decides the control-buffer size. See
+[metadata](metadata.md).
 
 | Member | Description |
 |--------|-------------|
@@ -66,8 +68,13 @@ borrowed range, so bind it to a name before iterating:
 
 ```cpp
 const auto view{batch.datagrams()};
-for (const auto& d : view | std::views::filter(&dgram::datagram::intact)) { ... }
+for (const auto& d : view | std::views::filter(dgram::is_intact)) { ... }
 ```
+
+`is_intact`, `is_truncated` and `is_control_truncated` are stateless predicates
+usable as adaptors. Prefer them to a member pointer: `datagram` is templated on
+the feature set, so `&datagram<Features>::intact` would name that set at every
+call site.
 
 **A view from a previous `receive` dangles once the next one is issued.** The
 whole block is reused in place.
@@ -81,6 +88,7 @@ One received datagram, borrowed from the batch that received it.
 | `std::span<const std::byte> payload()` | The bytes. Valid until the next `receive`. |
 | `const endpoint& from()` | Sender address, referencing the batch's own storage. |
 | `int flags()` | Raw `msg_flags`. |
+| `metadata<Features> meta()` | Parse this datagram's ancillary data. See [metadata](metadata.md). |
 | `bool truncated()` | `MSG_TRUNC`: the payload did not fit `SlotBytes` and the excess is gone. |
 | `bool control_truncated()` | `MSG_CTRUNC`: ancillary data did not fit and some is gone. |
 | `bool intact()` | Neither. |
@@ -93,7 +101,9 @@ datagram.
 
 ```cpp
 bool stage(std::span<const std::byte> payload, const endpoint& to);
-bool stage_copy(std::span<const std::byte> payload, const endpoint& to);  // SlotBytes > 0
+bool stage(std::span<const std::byte> payload, const endpoint& to, const control<Features>&);
+bool stage_copy(std::span<const std::byte> payload, const endpoint& to,
+                const control<Features>& = {});                          // SlotBytes > 0
 result<std::size_t> flush(const socket& sock, int flags = 0);
 bool full() const;
 std::size_t staged() const;
@@ -106,6 +116,10 @@ valid until `flush` returns.** It yields `false` when the batch is full.
 `stage_copy` copies into the batch's own slot, for bytes that will not outlive
 the flush. It requires `SlotBytes > 0` and yields `false` if the payload exceeds
 it.
+
+The `control` overload attaches ancillary data to that one datagram; see
+[metadata](metadata.md). `msg_controllen` is set from what was actually built,
+zero included, so nothing carries over between datagrams staged in the same slot.
 
 `flush` sends everything staged and clears the batch, returning how many were
 taken. A short send is not an error and the remainder is dropped: datagram

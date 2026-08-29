@@ -23,10 +23,14 @@ namespace dgram {
  * Options are types rather than runtime flags so the set is fixed at the call
  * site and costs nothing to carry. `apply` runs in the order the pack is
  * written, which matters: `SO_REUSEPORT` has to precede `bind`.
+ *
+ * The family is passed in because the same intent needs a different option per
+ * family: enabling destination-address reporting is `IP_PKTINFO` on a v4 socket
+ * and `IPV6_RECVPKTINFO` on a v6 one. An option that does not care ignores it.
  */
 export template <typename T>
-concept socket_option = requires(int fd) {
-    { T::apply(fd) } -> std::same_as<result<>>;
+concept socket_option = requires(int fd, family fam) {
+    { T::apply(fd, fam) } -> std::same_as<result<>>;
 };
 
 namespace detail {
@@ -41,7 +45,7 @@ template <typename T> [[nodiscard]] inline result<> set_option(const int fd, con
 
 /** @brief A boolean-valued option, the shape most of `SOL_SOCKET` takes. */
 template <int Level, int Name> struct flag_option {
-    [[nodiscard]] static result<> apply(const int fd) noexcept { return set_option(fd, Level, Name, 1); }
+    [[nodiscard]] static result<> apply(const int fd, family) noexcept { return set_option(fd, Level, Name, 1); }
 };
 
 } // namespace detail
@@ -54,7 +58,7 @@ export using reuse_addr = detail::flag_option<SOL_SOCKET, SO_REUSEADDR>;
 
 /** @brief `O_NONBLOCK`, so a receive returns `EAGAIN` instead of parking. */
 export struct nonblocking {
-    [[nodiscard]] static result<> apply(const int fd) noexcept {
+    [[nodiscard]] static result<> apply(const int fd, family) noexcept {
         const int flags{::fcntl(fd, F_GETFL, 0)};
         if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) [[unlikely]] {
             return fail<>();
@@ -65,12 +69,12 @@ export struct nonblocking {
 
 /** @brief `SO_RCVBUF`. The kernel doubles the request and caps it at `rmem_max`. */
 export template <std::size_t Bytes> struct recv_buffer {
-    [[nodiscard]] static result<> apply(const int fd) noexcept { return detail::set_option(fd, SOL_SOCKET, SO_RCVBUF, static_cast<int>(Bytes)); }
+    [[nodiscard]] static result<> apply(const int fd, family) noexcept { return detail::set_option(fd, SOL_SOCKET, SO_RCVBUF, static_cast<int>(Bytes)); }
 };
 
 /** @brief `SO_SNDBUF`. Doubled and capped like `recv_buffer`. */
 export template <std::size_t Bytes> struct send_buffer {
-    [[nodiscard]] static result<> apply(const int fd) noexcept { return detail::set_option(fd, SOL_SOCKET, SO_SNDBUF, static_cast<int>(Bytes)); }
+    [[nodiscard]] static result<> apply(const int fd, family) noexcept { return detail::set_option(fd, SOL_SOCKET, SO_SNDBUF, static_cast<int>(Bytes)); }
 };
 
 /**
@@ -80,7 +84,12 @@ export template <std::size_t Bytes> struct send_buffer {
  * the default is a `sysctl` and therefore not the same everywhere.
  */
 export struct v6_only {
-    [[nodiscard]] static result<> apply(const int fd) noexcept { return detail::set_option(fd, IPPROTO_IPV6, IPV6_V6ONLY, 1); }
+    [[nodiscard]] static result<> apply(const int fd, const family fam) noexcept {
+        if (fam != family::inet6) {
+            return std::unexpected{invalid_argument};
+        }
+        return detail::set_option(fd, IPPROTO_IPV6, IPV6_V6ONLY, 1);
+    }
 };
 
 /**
@@ -122,7 +131,7 @@ public:
 
         socket sock{fd};
         result<> applied{};
-        (void)((applied = Options::apply(fd), applied.has_value()) && ...);
+        (void)((applied = Options::apply(fd, fam), applied.has_value()) && ...);
         if (!applied) [[unlikely]] {
             return std::unexpected{applied.error()};
         }
