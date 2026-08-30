@@ -1,4 +1,4 @@
-# Builds and pushes the datagram_engine CI toolchain image to ghcr.io; the test
+# Builds and pushes the datagram-engine CI toolchain image to ghcr.io; the test
 # workflows only pull it. No schedule: a rebuild installs whatever Arch ships
 # that day, so toolchain bumps stay deliberate.
 name: ci-image

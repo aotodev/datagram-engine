@@ -16,6 +16,7 @@ checkout.
 
 | Suite | Covers |
 |-------|--------|
+| `doc_examples.cpp` | Every snippet printed in `README.md` and `docs/`, compiled and run. A snippet in a document is untested code that looks authoritative; this is what stops one rotting. |
 | `compile_checks.cpp` | Pure `static_assert`. Feature concepts, control-buffer sizing, batch geometry, which resources may be carved from, which metadata is readable. Compiling is the test; it is never run. |
 | `loopback_tests.cpp` | Batch reuse, truncation reporting, nonblocking receive, staging limits, the error combinators. |
 | `metadata_tests.cpp` | Destination address and ECN over loopback, both families, including a feature that was never enabled and an undersized control buffer. |

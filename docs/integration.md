@@ -2,12 +2,12 @@
 
 ```cmake
 include(FetchContent)
-FetchContent_Declare(datagram_engine
-    GIT_REPOSITORY https://github.com/aotodev/datagram_engine.git
+FetchContent_Declare(datagram-engine
+    GIT_REPOSITORY https://github.com/aotodev/datagram-engine.git
     GIT_TAG master
     SYSTEM
 )
-FetchContent_MakeAvailable(datagram_engine)
+FetchContent_MakeAvailable(datagram-engine)
 
 target_link_libraries(my_target PRIVATE dgram)
 ```

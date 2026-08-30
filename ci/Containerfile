@@ -1,9 +1,9 @@
-# Toolchain image for datagram_engine CI. Arch tracks a new enough GCC for the
+# Toolchain image for datagram-engine CI. Arch tracks a new enough GCC for the
 # C++26 features this project uses: expansion statements, contracts, import std.
 FROM archlinux:latest
 
 # Links the published package to the repo, so it inherits the repo's permissions.
-LABEL org.opencontainers.image.source=https://github.com/aotodev/datagram_engine
+LABEL org.opencontainers.image.source=https://github.com/aotodev/datagram-engine
 
 # iproute2: `tc qdisc ... root fq`, which SO_TXTIME pacing needs to do anything.
 RUN pacman -Syu --noconfirm \

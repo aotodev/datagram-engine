@@ -1,4 +1,4 @@
-# datagram_engine
+# datagram-engine
 
 A Linux UDP datagram engine in C++26: batched send and receive, all memory
 carved once at startup, and a protocol boundary that hands out nothing but
@@ -9,6 +9,52 @@ segmentation offload (`UDP_GRO` / `UDP_SEGMENT`) and transmit pacing
 (`SO_TXTIME`). It is not a general network library and has no TCP: the whole
 design turns on a batch being reclaimable in one step, which a byte stream is
 not.
+
+## At a glance
+
+```cpp
+import dgram;
+import libmem;
+
+using rx = dgram::receive_batch<64, 2048, dgram::features<dgram::ecn>>;
+using tx = dgram::transmit_batch<64>;
+
+auto sock = dgram::socket::open<dgram::reuse_port,
+                                dgram::receive_metadata<dgram::ecn>>(dgram::family::inet4);
+
+// Setup is a chain: each step runs only if the last succeeded, and the first
+// error is the one that comes out.
+const auto listening = sock->bind(dgram::endpoint::any(dgram::family::inet4, 9000))
+                     | dgram::then([&] { return sock->local_address(); })
+                     | dgram::map(&dgram::endpoint::text)
+                     | dgram::recover([](dgram::errc e) {
+                           return dgram::result<std::string>{std::string{dgram::describe(e)}};
+                       });
+
+libmem::arena arena{rx::footprint() + tx::footprint()};
+auto in = rx::carve(arena);
+auto out = tx::carve(arena);
+
+// The loop is a range pipeline. `segments()` splits a GRO-coalesced slot, so
+// nothing here branches on whether the kernel coalesced.
+(void)in->receive(*sock);
+for (const auto& d : in->datagrams() | std::views::filter(dgram::is_intact)) {
+    for (const auto& piece : d.segments()) {
+        (void)out->stage(piece, d.from());
+    }
+}
+(void)out->flush(*sock);
+```
+
+`then`, `map`, `recover` and `tap` compose a `result` left to right, in the order
+the steps run. They wrap `std::expected`'s `and_then` / `transform` / `or_else`,
+which read right to left and nest. Nothing throws, and a failure short-circuits
+the rest of the chain.
+
+The full program is [examples/echo.cpp](examples/echo.cpp): a batched echo server
+that reflects each datagram's ECN marking, reports the local address it arrived
+on, and splits coalesced slots, in about 90 lines. Every snippet on this page is
+compiled and run as a test, so none of them can rot.
 
 ## What's here
 
@@ -48,7 +94,7 @@ are surfaced per datagram rather than swallowed, so an undersized slot or contro
 buffer shows up as `truncated()` instead of silent corruption.
 
 ```cpp
-for (const auto& d : batch->datagrams() | std::views::filter(&dgram::datagram::intact)) {
+for (const auto& d : batch->datagrams() | std::views::filter(dgram::is_intact)) {
     (void)out->stage(d.payload(), d.from());
 }
 ```

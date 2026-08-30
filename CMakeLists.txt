@@ -8,7 +8,7 @@ enable_experimental_std()
 project(datagram_engine LANGUAGES CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    message(FATAL_ERROR "datagram_engine is Linux-only: it is built on recvmmsg, cmsg, GRO/GSO and SO_TXTIME.")
+    message(FATAL_ERROR "datagram-engine is Linux-only: it is built on recvmmsg, cmsg, GRO/GSO and SO_TXTIME.")
 endif()
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_VERSION VERSION_LESS "16")

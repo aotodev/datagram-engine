@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Configure, build and test datagram_engine. One build directory per
+# Configure, build and test datagram-engine. One build directory per
 # configuration, so switching does not force a rebuild.
 #
 #   scripts/make.sh                     plain Debug build + tests

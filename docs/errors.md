@@ -46,14 +46,18 @@ compose right to left. These wrap them so a chain reads in the order it runs.
 | `tap(f)` | `transform` | Run `f` for its effect, pass the value through. |
 
 ```cpp
-const auto port = dgram::socket::open<dgram::reuse_port>(dgram::family::inet4)
-                | dgram::then([](auto&& s) { return s.bind(local).transform([&] { return std::move(s); }); })
-                | dgram::then([](auto&& s) { return s.local_address(); })
-                | dgram::map(&dgram::endpoint::port);
+const auto listening = sock.bind(local)
+                     | dgram::then([&] { return sock.local_address(); })
+                     | dgram::map(&dgram::endpoint::text)
+                     | dgram::recover([](dgram::errc e) {
+                           return dgram::result<std::string>{std::string{dgram::describe(e)}};
+                       });
 ```
 
 `tap` yields by value, because `expected` cannot hold a reference. It does not
 run on the error path.
+
+Every example on this page is compiled and run in `tests/doc_examples.cpp`.
 
 ## `invoke_syscall`
 
