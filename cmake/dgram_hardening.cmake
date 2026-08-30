@@ -9,6 +9,7 @@ set(DGRAM_SANITIZER "none" CACHE STRING "Sanitizer: none, address, undefined, ad
 set_property(CACHE DGRAM_SANITIZER PROPERTY STRINGS none address undefined address+undefined thread)
 
 option(DGRAM_HARDENED "libstdc++ assertions, fortified sources, stack protection" OFF)
+option(DGRAM_CONTRACTS "Enable C++26 contract checks" ON)
 
 # ---------------------------------------------------------------------------
 # dgram_apply_hardening: call before FetchContent_MakeAvailable.
@@ -40,6 +41,23 @@ macro(dgram_apply_hardening)
         add_compile_options(${_dgram_san_flags} -fno-omit-frame-pointer -g)
         add_link_options(${_dgram_san_flags})
         message(STATUS "[dgram] Sanitizer: ${DGRAM_SANITIZER}")
+    endif()
+
+    # Contracts are a language-level setting, so like the sanitizers they have to
+    # be identical across the std BMI, libmem and dgram: CMake builds one `import
+    # std` BMI per distinct flag set, and a module compiled against one cannot be
+    # imported by a translation unit using another.
+    #
+    # `-fcontracts` is deliberately absent. GCC 16 enables contracts in
+    # `-std=c++26` on its own; the flag only matters for earlier standards, and
+    # passing it merely forked the BMI. The evaluation semantic is passed
+    # explicitly rather than left to the default, so the build says what it does.
+    if(DGRAM_CONTRACTS)
+        add_compile_options(-fcontract-evaluation-semantic=enforce)
+        message(STATUS "[dgram] Contracts: enforce")
+    else()
+        add_compile_options(-fcontract-evaluation-semantic=ignore)
+        message(STATUS "[dgram] Contracts: ignore")
     endif()
 
     if(DGRAM_HARDENED)

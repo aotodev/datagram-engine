@@ -18,7 +18,6 @@ endif()
 option(DGRAM_BUILD_TESTS    "Build unit tests"             OFF)
 option(DGRAM_BUILD_EXAMPLES "Build examples"               OFF)
 option(DGRAM_BUILD_FUZZERS  "Build the fuzz harnesses"     OFF)
-option(DGRAM_CONTRACTS      "Enable C++26 contract checks" ON)
 
 include(dgram_hardening)
 
@@ -74,12 +73,12 @@ target_sources(dgram
 
 target_link_libraries(dgram PUBLIC libmem)
 
-# Contracts live in non-template functions compiled here, so a consumer needs no
-# -fcontracts of its own; it does need the violation handler at link time.
-if(DGRAM_CONTRACTS)
-    target_compile_options(dgram PRIVATE -fcontracts -fcontract-evaluation-semantic=enforce)
-    target_link_libraries(dgram PUBLIC stdc++exp)
-endif()
+# The violation handler, always. Contracts are on by default in C++26, so a
+# consumer that never sets an evaluation semantic still gets `enforce` and still
+# needs this symbol. Linking it is not a compile flag, so it cannot fork a BMI;
+# leaving it conditional only means an obscure link error for someone who did
+# nothing wrong.
+target_link_libraries(dgram PUBLIC stdc++exp)
 
 add_library(dgram_flags INTERFACE)
 target_compile_options(dgram_flags INTERFACE

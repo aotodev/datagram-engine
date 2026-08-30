@@ -135,3 +135,36 @@ the hard way:
 
 Findings are pinned as unit tests in `malformed_control_tests.cpp` rather than
 left to a fuzz run.
+
+## Editor support
+
+clangd works, partially, and needs one flag that cannot be set in `.clangd`:
+
+```
+clangd --experimental-modules-support
+```
+
+Without it every `import` is an unresolved-module error. GCC's `.gcm` files are
+not readable by clang, so clangd has to build its own BMIs from source, and it
+only does that when asked.
+
+`.clangd` handles the rest: it strips the GCC driver flags clang rejects, which
+matters more than it looks. An unknown argument such as `-fcontracts` aborts
+clangd's module dependency scan *before* it parses anything, so one stray flag
+turns every file red for a reason that has nothing to do with the file.
+
+### What clangd cannot do
+
+Two constructs clang 22 does not implement, in two files:
+
+| File | Construct |
+|------|-----------|
+| `src/dgram/cmsg.cppm` | one `pre(...)` contract |
+| `src/dgram/feature.cppm` | two `template for` expansion statements |
+
+Everything importing them inherits the failure, which in practice is the whole
+library. Files that avoid both (`address`, `error`, `socket`) check clean.
+
+This is a gap in clang, not a defect here, and it closes when clang implements
+the two papers. Building the code is the diagnostic that always works, and a
+full build is a few seconds.
