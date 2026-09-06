@@ -1,0 +1,51 @@
+# The GNU dialect, which the library no longer pins away from. Separate workflow
+# so it keeps its own badge.
+name: gcc-gnu
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'examples/**'
+      - 'cmake/**'
+      - 'scripts/**'
+      - '**/CMakeLists.txt'
+      - '.github/workflows/gcc-gnu.yml'
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/aotodev/datagram-engine-ci:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: release, sanitizer: none, hardened: 'OFF', type: Release }
+          - { name: asan-ubsan, sanitizer: address+undefined, hardened: 'ON', type: Debug }
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_CXX_EXTENSIONS=ON \
+            -DCMAKE_BUILD_TYPE=${{ matrix.type }} \
+            -DDGRAM_SANITIZER=${{ matrix.sanitizer }} \
+            -DDGRAM_HARDENED=${{ matrix.hardened }} \
+            -DDGRAM_BUILD_TESTS=ON \
+            -DDGRAM_BUILD_EXAMPLES=ON
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j"$(nproc)"
