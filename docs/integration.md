@@ -3,16 +3,39 @@
 Two ways in. Fetch it as a subproject:
 
 ```cmake
+cmake_minimum_required(VERSION 3.30 FATAL_ERROR)
+
+# Before project(): `import std;` is opt-in and the opt-in has to happen before
+# CXX is enabled. Copy cmake/enable_standard_modules.cmake out of this repo,
+# because the engine is not fetched yet and its copy is not reachable.
+include(enable_standard_modules)
+enable_experimental_std()
+
+project(my_project LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 26)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_MODULE_STD ON)
+
 include(FetchContent)
 FetchContent_Declare(datagram-engine
     GIT_REPOSITORY https://github.com/aotodev/datagram-engine.git
-    GIT_TAG master
+    GIT_TAG v0.9.1
     SYSTEM
 )
 FetchContent_MakeAvailable(datagram-engine)
 
 target_link_libraries(my_target PRIVATE dgram::dgram)
 ```
+
+**The `enable_standard_modules` step is not optional and cannot be skipped by a
+fetching consumer.** Without it the configure fails at generate time with
+`The "CXX_MODULE_STD" property on target ... requires toolchain support`,
+naming a reason that says the opt-in must precede `project()`. The activation
+token is a UUID that changes with every CMake release, which is why it lives in
+a helper that maps version to token rather than in a line you paste. The
+`find_package` path below has the same requirement and does not have the
+chicken-and-egg problem, since an install ships the helper.
 
 Or install it once and find it:
 
@@ -103,10 +126,10 @@ asymmetry alone is a CRC mismatch.
 `libmem` is fetched automatically. Point at a local checkout with
 `-DFETCHCONTENT_SOURCE_DIR_LIBMEM=/path/to/libmem`.
 
-The engine pins `libmem` to a release tag, so that half is reproducible. **The
-snippet above is not:** `GIT_TAG master` means a build is only as reproducible as
-the engine's master was that day, so pin a tag or a commit if two machines have
-to build the same thing.
+Both fetches name a release tag, the engine's above and libmem's inside it, so a
+build is reproducible without pinning anything yourself. `GIT_TAG master` tracks
+whatever master is that day, which is a choice worth making deliberately rather
+than by leaving the snippet unedited.
 
 A local checkout is the hazard from the other side. libmem's compile options
 reach the `import std` BMI, so a stale one forks it, and CMake then rebuilds
