@@ -1,5 +1,6 @@
-build*/
-*.local.md
+build/
+build-*/
+*.local.*
 compile_commands.json
 .cache/
-.clangd
+.deps/

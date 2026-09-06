@@ -1,0 +1,32 @@
+# clangd against a GCC C++26 modules build.
+#
+# Needs `--experimental-modules-support` on the clangd command line; it is not
+# settable here. Without it every `import` is an unresolved-module error, because
+# clangd has to build its own BMIs (GCC's .gcm files are not readable by clang).
+#
+# Two constructs in this codebase clang 22 cannot parse at all, so the files
+# holding them, and everything importing them, stay red no matter what is
+# configured here:
+#   src/dgram/cmsg.cppm    a `pre(...)` contract
+#   src/dgram/feature.cppm two `template for` expansion statements
+# See docs/testing.md.
+CompileFlags:
+  CompilationDatabase: build/debug-none
+  Remove:
+    # GCC driver flags clang rejects outright.
+    - -fmodules-ts
+    - -fmodule-mapper=*
+    - -fdeps-format=*
+    - -mabi=*
+    - -mno=*
+    - -Wnrvo
+    # Contracts: clang has no such flag, and an unknown argument aborts clangd's
+    # module dependency scan before it parses anything.
+    - -fcontracts
+    - -fcontract-evaluation-semantic=*
+    # Without this, clang-only warnings arrive in the editor as red errors.
+    - -Werror
+  Add:
+    # GCC 16 takes #embed in C++26; clang still calls it a C23 extension.
+    - -Wno-c23-extensions
+    - "-std=c++26"
