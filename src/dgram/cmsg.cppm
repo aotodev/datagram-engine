@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file cmsg.cppm
  * @brief Typed wrappers over the `CMSG_*` macros.

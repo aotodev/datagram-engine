@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file fuzz_segments.cpp
  * @brief Fuzzer for the GRO segmentation walk.

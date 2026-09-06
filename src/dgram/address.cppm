@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file address.cppm
  * @brief IPv4 / IPv6 endpoints over `sockaddr_storage`.

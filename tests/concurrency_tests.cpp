@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file concurrency_tests.cpp
  * @brief The shared-nothing claim, made executable.

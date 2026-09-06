@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file metadata_tests.cpp
  * @brief Ancillary data over loopback: destination address and ECN, both

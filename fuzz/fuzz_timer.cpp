@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file fuzz_timer.cpp
  * @brief Differential fuzzer for the timing wheel.

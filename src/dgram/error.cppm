@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file error.cppm
  * @brief Syscall error monad and the pipeable combinators over it.

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file batch.cppm
  * @brief Pre-carved `recvmmsg` / `sendmmsg` argument blocks and the views over them.

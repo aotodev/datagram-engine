@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file demux.cppm
  * @brief Routing arrived datagrams to the protocol state that owns them.

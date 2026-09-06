@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file fuzz_demux.cpp
  * @brief Fuzzer for the payload key projection and the flow table.

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file malformed_control_tests.cpp
  * @brief Control buffers the kernel would never write, which the parser must

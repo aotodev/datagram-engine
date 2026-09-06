@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file fuzz_driver.cpp
  * @brief `main` for the fuzz harness, in two flavours.

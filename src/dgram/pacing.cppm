@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file pacing.cppm
  * @brief Transmit-time pacing: `SO_TXTIME`, `SCM_TXTIME`, and the rate arithmetic.

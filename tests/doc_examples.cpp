@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file doc_examples.cpp
  * @brief The examples printed in README.md and docs/, compiled and run.

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 // Pure compile-time checks over the geometry and feature-set layer. Never run.
 
 #include <netinet/in.h>

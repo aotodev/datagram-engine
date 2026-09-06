@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file socket.cppm
  * @brief The UDP file descriptor and the compile-time set of options applied to it.

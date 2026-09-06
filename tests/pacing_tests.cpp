@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file pacing_tests.cpp
  * @brief Transmit-time pacing.

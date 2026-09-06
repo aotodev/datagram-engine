@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file demux_tests.cpp
  * @brief Keys, the flow table, and routing arrivals to protocol state.

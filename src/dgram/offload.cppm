@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file offload.cppm
  * @brief Hardware segmentation offload: `UDP_GRO` on receive, `UDP_SEGMENT` on send.

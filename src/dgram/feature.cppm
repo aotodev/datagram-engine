@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file feature.cppm
  * @brief The compile-time set of ancillary-data features carried by a batch.

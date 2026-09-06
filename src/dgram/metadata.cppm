@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file metadata.cppm
  * @brief The ancillary-data features: destination address and ECN.

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file fuzz_cmsg_parse.cpp
  * @brief Fuzzer for the ancillary-data parser.

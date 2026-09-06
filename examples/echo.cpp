@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 // Batched UDP echo: one arena, one recvmmsg, one sendmmsg, no copy of the
 // payload. Reflects each datagram's ECN marking back, reports the local address
 // it arrived on, and splits GRO-coalesced slots back into datagrams.

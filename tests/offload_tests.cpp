@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file offload_tests.cpp
  * @brief GRO receive and GSO transmit over loopback, plus the segmentation walk.

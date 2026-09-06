@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Aoto
+// SPDX-License-Identifier: MIT
 /**
  * @file timer_tests.cpp
  * @brief The hierarchical timing wheel.

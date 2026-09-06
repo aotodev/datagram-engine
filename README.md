@@ -182,3 +182,7 @@ ignores every departure time without reporting anything; see
 - [Errors](docs/errors.md): `result`, `errc`, and the pipe combinators.
 - [Integration](docs/integration.md): consuming dgram from another CMake project.
 - [Testing](docs/testing.md): the build matrix, what each suite covers, and how the fuzzing works.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
