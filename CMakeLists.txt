@@ -5,7 +5,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(enable_standard_modules)
 enable_experimental_std()
 
-project(datagram_engine VERSION 0.9.1 LANGUAGES CXX)
+project(datagram_engine VERSION 0.9.2 LANGUAGES CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "datagram-engine is Linux-only: it is built on recvmmsg, cmsg, GRO/GSO and SO_TXTIME.")
@@ -26,9 +26,13 @@ if(PROJECT_IS_TOP_LEVEL)
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
     set(CMAKE_CXX_STANDARD 26)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
-    set(CMAKE_CXX_EXTENSIONS OFF)
     set(CMAKE_CXX_MODULE_STD ON)
     set(CMAKE_CXX_SCAN_FOR_MODULES ON)
+
+    # Not forced: the gcc-gnu.yml leg configures with -DCMAKE_CXX_EXTENSIONS=ON.
+    if(NOT DEFINED CMAKE_CXX_EXTENSIONS)
+        set(CMAKE_CXX_EXTENSIONS OFF)
+    endif()
 endif()
 
 if(PROJECT_IS_TOP_LEVEL)
@@ -40,9 +44,9 @@ endif()
 include(FetchContent)
 FetchContent_Declare(libmem
     GIT_REPOSITORY https://github.com/aotodev/libmem.git
-    GIT_TAG v0.9.0
+    GIT_TAG v0.9.1
     SYSTEM
-    FIND_PACKAGE_ARGS 0.9.0
+    FIND_PACKAGE_ARGS 0.9.1
 )
 
 # A fetched libmem has no export set of its own, and install(EXPORT) refuses a
@@ -65,10 +69,12 @@ FetchContent_MakeAvailable(libmem)
 add_library(dgram)
 add_library(dgram::dgram ALIAS dgram)
 
+# No CXX_EXTENSIONS here: pinning it per target cannot be overridden by a
+# consumer, and a consumer left at CMake's default then forks the `import std`
+# BMI. The dialect is inherited; C++26 is a floor and stays pinned.
 set_target_properties(dgram PROPERTIES
     CXX_STANDARD 26
     CXX_STANDARD_REQUIRED ON
-    CXX_EXTENSIONS OFF
     CXX_MODULE_STD ON
     CXX_SCAN_FOR_MODULES ON
     VERSION   ${PROJECT_VERSION}
@@ -94,6 +100,11 @@ target_sources(dgram
       src/dgram/dgram.cppm
 )
 
+# The C++26 floor as a usage requirement, not just a property on our own target:
+# without it a consumer that sets no CMAKE_CXX_STANDARD fails at generate time
+# with `does not include "cxx_std_20" (or newer)`.
+target_compile_features(dgram PUBLIC cxx_std_26)
+
 target_link_libraries(dgram PUBLIC libmem::libmem)
 
 # The violation handler, always. Contracts are on by default in C++26, so a
@@ -105,16 +116,17 @@ target_link_libraries(dgram PUBLIC stdc++exp)
 
 add_library(dgram_flags INTERFACE)
 target_compile_options(dgram_flags INTERFACE
-    -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor -Wold-style-cast
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wnrvo
 )
+# BUILD_INTERFACE: a PRIVATE link still reaches the export, bare, in
+# IMPORTED_CXX_MODULES_LINK_LIBRARIES, and a consumer then compiles our module
+# interfaces with our warnings rather than its own.
 if(PROJECT_IS_TOP_LEVEL)
-    target_link_libraries(dgram PRIVATE dgram_flags)
+    target_link_libraries(dgram PRIVATE $<BUILD_LOCAL_INTERFACE:dgram_flags>)
 endif()
 
 # ---------------------------------------------------------------------------------------
 # Install / package
-# dgram_flags lands in INTERFACE_LINK_LIBRARIES under $<LINK_ONLY:> despite being
-# PRIVATE; install(EXPORT) rejects the set without it.
 # ---------------------------------------------------------------------------------------
 if(DGRAM_INSTALL)
     include(GNUInstallDirs)
@@ -126,7 +138,7 @@ if(DGRAM_INSTALL)
     # keyword; cmake rejects splitting the call ("not all of its interface file
     # sets are installed").
     # cmake-lint: disable=E1122
-    install(TARGETS dgram dgram_flags
+    install(TARGETS dgram
         EXPORT dgram-targets
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
         LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"

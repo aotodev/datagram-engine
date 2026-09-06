@@ -48,6 +48,13 @@ These are compile flags, so they must be identical across the `import std` BMI,
 libmem and dgram. They are applied at directory scope before any dependency is
 configured, for exactly that reason.
 
+**The GNU dialect** gets its own CI workflow, `gcc-gnu.yml`, configuring with
+`-DCMAKE_CXX_EXTENSIONS=ON`. The library pins no dialect and inherits the
+consumer's, so `gnu++26` is a configuration someone will really build, and the
+only honest way to claim it works is to run the suite in it. `scripts/make.sh`
+builds the strict dialect; add `-DCMAKE_CXX_EXTENSIONS=ON` to a manual configure
+for the other.
+
 ## Fuzzing
 
 Two harnesses, both over the paths where kernel-supplied values drive pointer

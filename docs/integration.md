@@ -13,14 +13,12 @@ enable_experimental_std()
 
 project(my_project LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 26)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_MODULE_STD ON)
 
 include(FetchContent)
 FetchContent_Declare(datagram-engine
     GIT_REPOSITORY https://github.com/aotodev/datagram-engine.git
-    GIT_TAG v0.9.1
+    GIT_TAG v0.9.2
     SYSTEM
 )
 FetchContent_MakeAvailable(datagram-engine)
@@ -36,6 +34,32 @@ token is a UUID that changes with every CMake release, which is why it lives in
 a helper that maps version to token rather than in a line you paste. The
 `find_package` path below has the same requirement and does not have the
 chicken-and-egg problem, since an install ships the helper.
+
+**That is the only line you have to write.** The standard comes with the target:
+`dgram` carries `cxx_std_26` as a usage requirement, so a consumer that sets no
+`CMAKE_CXX_STANDARD` still gets C++26. And **the dialect is yours**, not ours:
+`dgram` pins neither `CXX_EXTENSIONS` nor its opposite, so it compiles as
+`c++26` or `gnu++26` according to what your build already uses. Both are tested
+in CI.
+
+That matters more than a style preference. A library that pins the dialect on
+its own target cannot be overridden by a consumer, and a consumer left at
+CMake's default then differs from it, which means two `import std` BMIs. CMake
+copes by synthesising a second std build and recompiling the library's module
+interfaces against it, at 6 compiles of libstdc++'s `std.cc` instead of 2 and
+69 module compiles instead of 54. Worse, it can fail outright, naming neither
+the flag nor the file:
+
+```
+libmem: error: import 'std' has CRC mismatch
+dgram:  error: import 'std' has CRC mismatch
+```
+
+That happens when the consumer's own translation unit is pointed at the std BMI
+of the *other* dialect while the synthesised module targets get the right one,
+and whether it happens depends on the shape of the dependency graph. Inheriting
+the dialect removes the split rather than resolving it, so there is nothing here
+for you to get right.
 
 Or install it once and find it:
 
