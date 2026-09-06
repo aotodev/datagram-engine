@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# PUBLIC on dgram: the arena is in the engine's own API, so a consumer needs it.
+find_dependency(libmem 0.9.0)
+
+include("${CMAKE_CURRENT_LIST_DIR}/dgram-targets.cmake")
+
+check_required_components(dgram)

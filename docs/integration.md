@@ -1,5 +1,7 @@
 # Using dgram from another project
 
+Two ways in. Fetch it as a subproject:
+
 ```cmake
 include(FetchContent)
 FetchContent_Declare(datagram-engine
@@ -9,11 +11,49 @@ FetchContent_Declare(datagram-engine
 )
 FetchContent_MakeAvailable(datagram-engine)
 
-target_link_libraries(my_target PRIVATE dgram)
+target_link_libraries(my_target PRIVATE dgram::dgram)
 ```
+
+Or install it once and find it:
+
+```cmake
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_INSTALL_PREFIX}/lib/cmake/dgram")
+include(enable_standard_modules)   # before project(): it sets the import std UUID
+enable_experimental_std()
+
+project(my_project LANGUAGES CXX)
+set(CMAKE_CXX_MODULE_STD ON)
+
+find_package(dgram 0.9.0 REQUIRED)
+target_link_libraries(my_target PRIVATE dgram::dgram)
+```
+
+`dgram::dgram` names the target either way; the bare `dgram` also works from a
+subproject build, where it is a real target rather than an alias.
 
 Then `import dgram;`. The module carries `libmem` transitively, so
 `import libmem;` is available too and is needed for the arena.
+
+## What an install puts down
+
+`cmake --install` writes both packages, because a consumer builds its own BMIs
+and dgram's interfaces `import libmem`:
+
+| Path | What |
+|------|------|
+| `lib/libdgram.a`, `lib/liblibmem.a` | the archives |
+| `share/dgram/modules/`, `share/libmem/modules/` | module interfaces, as **sources** |
+| `lib/cmake/dgram/`, `lib/cmake/libmem/` | the package configs and export sets |
+| `lib/cmake/dgram/enable_standard_modules.cmake` | needed before your `project()`, so it ships loose |
+
+**No BMI is installed.** A BMI is only valid for the exact flag set that built
+it, so shipping one would be shipping a landmine; the consumer compiles the
+installed interfaces under its own flags. That is also why the codegen rule
+below applies to a `find_package` build exactly as it does to a fetched one.
+
+`find_package(dgram)` pulls in `libmem` through `find_dependency`, so a
+consumer names one package rather than two. Version compatibility is
+`SameMinorVersion`: before 1.0 a minor bump is a break.
 
 ## Requirements
 
@@ -40,6 +80,7 @@ asymmetry alone is a CRC mismatch.
 |--------|---------|--------|
 | `DGRAM_BUILD_TESTS` | `OFF` | Build the GoogleTest suite and the compile checks |
 | `DGRAM_BUILD_EXAMPLES` | `OFF` | Build the examples |
+| `DGRAM_INSTALL` | top-level only | Install rules and the `find_package` config |
 | `USE_SANITIZERS` | `OFF` | ASan + UBSan, directory-wide |
 
 `libmem` is fetched automatically. Point at a local checkout with

@@ -5,7 +5,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(enable_standard_modules)
 enable_experimental_std()
 
-project(datagram_engine LANGUAGES CXX)
+project(datagram_engine VERSION 0.9.0 LANGUAGES CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "datagram-engine is Linux-only: it is built on recvmmsg, cmsg, GRO/GSO and SO_TXTIME.")
@@ -15,9 +15,10 @@ if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_VERSION VERSIO
     message(FATAL_ERROR "GCC >= 16 is required. Detected: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 endif()
 
-option(DGRAM_BUILD_TESTS    "Build unit tests"             OFF)
-option(DGRAM_BUILD_EXAMPLES "Build examples"               OFF)
-option(DGRAM_BUILD_FUZZERS  "Build the fuzz harnesses"     OFF)
+option(DGRAM_BUILD_TESTS    "Build unit tests"                                OFF)
+option(DGRAM_BUILD_EXAMPLES "Build examples"                                  OFF)
+option(DGRAM_BUILD_FUZZERS  "Build the fuzz harnesses"                        OFF)
+option(DGRAM_INSTALL        "Generate install rules and a find_package config" ${PROJECT_IS_TOP_LEVEL})
 
 include(dgram_hardening)
 
@@ -41,10 +42,20 @@ FetchContent_Declare(libmem
     GIT_REPOSITORY https://github.com/aotodev/libmem.git
     GIT_TAG v0.9.0
     SYSTEM
+    FIND_PACKAGE_ARGS 0.9.0
 )
+
+# A fetched libmem has no export set of its own, and install(EXPORT) refuses a
+# target whose dependency is in none. Its module sources have to ship anyway:
+# dgram's interfaces `import libmem`, so a consumer builds libmem's BMIs too.
+if(DGRAM_INSTALL)
+    set(LIBMEM_INSTALL ON CACHE BOOL "" FORCE)
+endif()
+
 FetchContent_MakeAvailable(libmem)
 
 add_library(dgram STATIC)
+add_library(dgram::dgram ALIAS dgram)
 
 set_target_properties(dgram PROPERTIES
     CXX_STANDARD 26
@@ -56,7 +67,9 @@ set_target_properties(dgram PROPERTIES
 
 target_sources(dgram
   PUBLIC
-    FILE_SET CXX_MODULES FILES
+    FILE_SET CXX_MODULES
+      BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/src
+      FILES
       src/dgram/error.cppm
       src/dgram/cmsg.cppm
       src/dgram/address.cppm
@@ -71,7 +84,7 @@ target_sources(dgram
       src/dgram/dgram.cppm
 )
 
-target_link_libraries(dgram PUBLIC libmem)
+target_link_libraries(dgram PUBLIC libmem::libmem)
 
 # The violation handler, always. Contracts are on by default in C++26, so a
 # consumer that never sets an evaluation semantic still gets `enforce` and still
@@ -86,6 +99,57 @@ target_compile_options(dgram_flags INTERFACE
 )
 if(PROJECT_IS_TOP_LEVEL)
     target_link_libraries(dgram PRIVATE dgram_flags)
+endif()
+
+# ---------------------------------------------------------------------------------------
+# Install / package
+# dgram_flags lands in INTERFACE_LINK_LIBRARIES under $<LINK_ONLY:> despite being
+# PRIVATE; install(EXPORT) rejects the set without it.
+# ---------------------------------------------------------------------------------------
+if(DGRAM_INSTALL)
+    include(GNUInstallDirs)
+    include(CMakePackageConfigHelpers)
+
+    set(DGRAM_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/dgram")
+
+    # cmake-lint predates FILE_SET and reads its DESTINATION as a duplicate
+    # keyword; cmake rejects splitting the call ("not all of its interface file
+    # sets are installed").
+    # cmake-lint: disable=E1122
+    install(TARGETS dgram dgram_flags
+        EXPORT dgram-targets
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        # Module interfaces install as sources: the consumer builds their own BMIs.
+        FILE_SET CXX_MODULES DESTINATION "${CMAKE_INSTALL_DATADIR}/dgram/modules"
+    )
+
+    install(EXPORT dgram-targets
+        FILE dgram-targets.cmake
+        NAMESPACE dgram::
+        DESTINATION "${DGRAM_INSTALL_CMAKEDIR}"
+        CXX_MODULES_DIRECTORY cxx-modules
+    )
+
+    # Consumers need this before their own project() call, so it ships separately.
+    install(FILES cmake/enable_standard_modules.cmake
+        DESTINATION "${DGRAM_INSTALL_CMAKEDIR}")
+
+    configure_package_config_file(
+        cmake/dgramConfig.cmake.in
+        "${CMAKE_CURRENT_BINARY_DIR}/dgramConfig.cmake"
+        INSTALL_DESTINATION "${DGRAM_INSTALL_CMAKEDIR}")
+
+    # SameMinorVersion: pre-1.0, a minor bump is a break.
+    write_basic_package_version_file(
+        "${CMAKE_CURRENT_BINARY_DIR}/dgramConfigVersion.cmake"
+        COMPATIBILITY SameMinorVersion)
+
+    install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/dgramConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/dgramConfigVersion.cmake"
+        DESTINATION "${DGRAM_INSTALL_CMAKEDIR}")
 endif()
 
 if(DGRAM_BUILD_EXAMPLES)
