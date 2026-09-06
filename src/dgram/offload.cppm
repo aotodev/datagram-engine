@@ -41,6 +41,18 @@ export struct gro {
 
     static constexpr std::size_t space{detail::space_for(sizeof(int))};
 
+    /**
+     * @brief Largest buffer the kernel will coalesce into one slot.
+     *
+     * The number a receive slot has to be sized for once this feature is in the
+     * set. It is not asserted here because an undersized slot is a legitimate
+     * thing to build, and to test: truncation is reported rather than hidden,
+     * and this engine's own suite constructs the case on purpose. A consumer
+     * that always enables coalescing should assert against this rather than
+     * against a literal, so the number stays in one place.
+     */
+    static constexpr std::size_t max_coalesced{1U << 16};
+
     [[nodiscard]] static bool matches(const int level, const int type) noexcept { return level == SOL_UDP && type == UDP_GRO; }
 
     [[nodiscard]] static std::optional<value_type> parse(const ::cmsghdr* c) noexcept {

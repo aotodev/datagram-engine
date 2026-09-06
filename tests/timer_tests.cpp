@@ -310,4 +310,158 @@ TEST(TimerWheel, WorksFromAnArbitraryEpoch) {
     }
 }
 
+/* ============================================================================
+ * Waiting on the wheel
+ *
+ * What a loop that blocks on a socket needs: how long until something is due.
+ * Every case below is one a poll loop actually hits.
+ * ============================================================================ */
+
+TEST(TimerWheel, NextDeadlineIsEmptyWhenNothingIsArmed) {
+    libmem::arena arena{wheel::footprint()};
+    auto w{wheel::carve(arena, tick, 0ns)};
+    ASSERT_TRUE(w.has_value());
+    EXPECT_FALSE(w->next_deadline().has_value());
+
+    const auto handle{w->schedule(1, 5ms)};
+    ASSERT_TRUE(handle.valid());
+    EXPECT_TRUE(w->cancel(handle));
+    EXPECT_FALSE(w->next_deadline().has_value()) << "cancelling the last timer empties the wheel again";
+}
+
+TEST(TimerWheel, NextDeadlineIsTheSoonestArmed) {
+    libmem::arena arena{wheel::footprint()};
+    auto w{wheel::carve(arena, tick, 0ns)};
+    ASSERT_TRUE(w.has_value());
+
+    (void)w->schedule(1, 40ms);
+    (void)w->schedule(2, 7ms);
+    (void)w->schedule(3, 19ms);
+    ASSERT_TRUE(w->next_deadline().has_value());
+    EXPECT_EQ(*w->next_deadline(), 7ms) << "order of scheduling must not matter";
+}
+
+/* The wheels are searched level by level, so a deadline that has not cascaded
+   down yet still has to be found, and found before a nearer one is missed. */
+TEST(TimerWheel, NextDeadlineFindsTimersOnEveryLevel) {
+    libmem::arena arena{wheel::footprint()};
+    auto w{wheel::carve(arena, tick, 0ns)};
+    ASSERT_TRUE(w.has_value());
+
+    // 4 slots per level: level 0 spans 4 ticks, level 1 sixteen, level 2 sixty-four.
+    (void)w->schedule(1, 200ms);
+    ASSERT_TRUE(w->next_deadline().has_value());
+    EXPECT_EQ(*w->next_deadline(), 200ms) << "a timer three levels up is still the soonest when it is the only one";
+
+    (void)w->schedule(2, 30ms);
+    EXPECT_EQ(*w->next_deadline(), 30ms);
+    (void)w->schedule(3, 6ms);
+    EXPECT_EQ(*w->next_deadline(), 6ms);
+    (void)w->schedule(4, 2ms);
+    EXPECT_EQ(*w->next_deadline(), 2ms);
+}
+
+/* The property that matters to a loop: waiting exactly that long and no longer
+   always lands on a tick where something fires. */
+TEST(TimerWheel, WaitingForNextDeadlineAlwaysWakesToWork) {
+    libmem::arena arena{wheel::footprint()};
+    auto w{wheel::carve(arena, tick, 0ns)};
+    ASSERT_TRUE(w.has_value());
+
+    std::mt19937 rng{20260830};
+    std::uniform_int_distribution<std::uint64_t> delay{1, 300};
+    std::size_t armed{};
+    for (std::uint32_t id{}; id < 40; ++id) {
+        // Some of these are past the horizon on a 4-by-4 wheel and are refused,
+        // which is the wheel doing its job; only what it took has to fire.
+        armed += static_cast<std::size_t>(w->schedule(id, tick * delay(rng)).valid());
+    }
+    ASSERT_GT(armed, 0u);
+    ASSERT_LT(armed, 40u) << "this wheel's horizon should refuse some of these, or the case is untested";
+
+    std::size_t fired{};
+    std::size_t wakeups{};
+    while (const auto deadline{w->next_deadline()}) {
+        ++wakeups;
+        const auto now{*deadline};
+        const auto count{w->advance(now, [&](const std::uint32_t) noexcept { ++fired; })};
+        EXPECT_GT(count, 0u) << "waking at next_deadline must find something due, not an empty tick";
+        ASSERT_LT(wakeups, 100u) << "the wheel must drain, not stall";
+    }
+    EXPECT_EQ(fired, armed);
+}
+
+/* The slot the cursor sits on is the one whose index says nothing: everything
+   else at a level maps to exactly one period, but this one also collects what
+   wrapped onto it a whole revolution later. A wheel whose only timer is one of
+   those has to find it anyway. */
+TEST(TimerWheel, NextDeadlineFindsATimerWrappedOntoTheCursorSlot) {
+    libmem::arena arena{wheel::footprint()};
+    auto w{wheel::carve(arena, tick, 0ns)};
+    ASSERT_TRUE(w.has_value());
+
+    // Four slots per level: at tick 3, level 1 sits on slot 0, and a deadline 15
+    // ticks out lands on slot 0 as well, a full revolution of that level away.
+    EXPECT_EQ(w->advance(3ms), 0u);
+    ASSERT_TRUE(w->schedule(1, 18ms).valid());
+
+    ASSERT_TRUE(w->next_deadline().has_value());
+    EXPECT_EQ(*w->next_deadline(), 18ms);
+    EXPECT_EQ(w->advance(*w->next_deadline(), [](const std::uint32_t) noexcept {}), 1u) << "and waiting that long has to actually fire it";
+}
+
+TEST(TimerWheel, NextDeadlineMatchesTheNaiveMinimumUnderChurn) {
+    libmem::arena arena{wheel::footprint()};
+    auto w{wheel::carve(arena, tick, 0ns)};
+    ASSERT_TRUE(w.has_value());
+
+    std::mt19937 rng{7};
+    std::uniform_int_distribution<std::uint64_t> delay{1, 500};
+    std::map<std::uint32_t, std::uint64_t> armed{};
+    std::vector<std::pair<std::uint32_t, dgram::timer_handle>> live{};
+
+    std::uint64_t now_tick{};
+    for (std::uint32_t round{}; round < 400; ++round) {
+        if (live.size() < 30) {
+            const auto at{now_tick + delay(rng)};
+            const auto handle{w->schedule(round, tick * static_cast<std::int64_t>(at))};
+            if (handle.valid()) {
+                armed[round] = at;
+                live.emplace_back(round, handle);
+            }
+        } else {
+            const auto victim{live.back()};
+            live.pop_back();
+            if (w->cancel(victim.second)) {
+                armed.erase(victim.first);
+            }
+        }
+
+        now_tick += 3;
+        const auto now{tick * static_cast<std::int64_t>(now_tick)};
+        (void)w->advance(now, [&](const std::uint32_t id) noexcept { armed.erase(id); });
+        std::erase_if(live, [&](const auto& p) { return !armed.contains(p.first); });
+
+        const auto expected{std::ranges::min_element(armed, {}, [](const auto& p) { return p.second; })};
+        if (expected == armed.end()) {
+            EXPECT_FALSE(w->next_deadline().has_value()) << "round " << round;
+        } else {
+            ASSERT_TRUE(w->next_deadline().has_value()) << "round " << round;
+            EXPECT_EQ(*w->next_deadline(), tick * static_cast<std::int64_t>(expected->second)) << "round " << round;
+        }
+    }
+}
+
+TEST(TimerWheel, TimeToNextIsNeverNegative) {
+    libmem::arena arena{wheel::footprint()};
+    auto w{wheel::carve(arena, tick, 0ns)};
+    ASSERT_TRUE(w.has_value());
+
+    (void)w->schedule(1, 5ms);
+    ASSERT_TRUE(w->time_to_next(0ns).has_value());
+    EXPECT_EQ(*w->time_to_next(0ns), 5ms);
+    EXPECT_EQ(*w->time_to_next(4ms), 1ms);
+    EXPECT_EQ(*w->time_to_next(500ms), 0ns) << "a deadline already past means wait no time, not a negative wait";
+}
+
 } // namespace

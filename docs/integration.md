@@ -45,6 +45,18 @@ asymmetry alone is a CRC mismatch.
 `libmem` is fetched automatically. Point at a local checkout with
 `-DFETCHCONTENT_SOURCE_DIR_LIBMEM=/path/to/libmem`.
 
+The engine pins `libmem` to a release tag, so that half is reproducible. **The
+snippet above is not:** `GIT_TAG master` means a build is only as reproducible as
+the engine's master was that day, so pin a tag or a commit if two machines have
+to build the same thing.
+
+A local checkout is the hazard from the other side. libmem's compile options
+reach the `import std` BMI, so a stale one forks it, and CMake then rebuilds
+libmem's module interfaces under a second flag set. That surfaces as
+`'libmem::aligned_monotonic_resource' has not been declared`, or as `-Werror`
+inside libstdc++ headers, neither of which points anywhere near the cause. Pull
+it, or drop the override and take the pinned tag.
+
 ## Sizing
 
 Every batch reports a `constexpr footprint()`. Sum them, make one arena that

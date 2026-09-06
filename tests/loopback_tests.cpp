@@ -223,4 +223,29 @@ TEST(Error, PipeCombinatorsChainLeftToRight) {
     EXPECT_EQ(*recovered, 7);
 }
 
+/* A failed send is not a short send: nothing left, so the caller must still be
+   holding everything it staged. Clearing here would lose datagrams silently for
+   any caller that stages by reference and then drops its own copy. */
+TEST(TransmitBatch, AFailedFlushLeavesTheBatchStaged) {
+    libmem::arena arena{dgram::transmit_batch<4, 64>::footprint()};
+    auto tx{dgram::transmit_batch<4, 64>::carve(arena)};
+    ASSERT_TRUE(tx.has_value());
+
+    // A socket that cannot send: never bound, and pointed at nothing reachable.
+    auto sender{dgram::socket::open<dgram::nonblocking>(dgram::family::inet4)};
+    ASSERT_TRUE(sender.has_value());
+    const auto unreachable{*dgram::endpoint::parse(dgram::family::inet6, "::1", 9)};
+
+    const std::array<std::byte, 4> payload{};
+    ASSERT_TRUE(tx->stage_copy(payload, unreachable));
+    ASSERT_EQ(tx->staged(), 1u);
+
+    const auto sent{tx->flush(*sender)};
+    ASSERT_FALSE(sent.has_value()) << "a v6 destination on a v4 socket cannot be sent";
+    EXPECT_EQ(tx->staged(), 1u) << "the caller has to be able to see what did not go";
+
+    tx->discard();
+    EXPECT_EQ(tx->staged(), 0u);
+}
+
 } // namespace

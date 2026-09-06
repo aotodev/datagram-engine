@@ -37,8 +37,18 @@ namespace dgram {
 /**
  * @brief One datagram, presented without any reference to how it was received.
  *
- * Everything here borrows from the batch and is valid only until its next
- * `receive`, exactly like `datagram`. A protocol that keeps bytes copies them.
+ * A view, not a value: it holds references and cannot be reseated or assigned.
+ * The three borrows do not all last as long, so none of them may be kept:
+ *
+ * | member    | valid until                                  |
+ * |-----------|----------------------------------------------|
+ * | `payload` | the batch's next `receive`                    |
+ * | `from`    | the batch's next `receive`                    |
+ * | `meta`    | **the end of the `on_datagram` call**         |
+ *
+ * `meta` is the short one because `route` parses it into a local, once per slot
+ * rather than once per datagram. A protocol that keeps anything copies it, and
+ * for `meta` that means copying inside the call.
  */
 export template <feature_set Features> struct arrival {
     std::span<const std::byte> payload; ///< one datagram, already de-coalesced
@@ -224,6 +234,9 @@ export template <demux_key Key, typename Value, std::size_t Slots> class flow_ta
     static_assert(std::is_trivially_destructible_v<Value>, "the table never runs a destructor; store a handle or an index");
 
 public:
+    using key_type = Key;
+    using value_type = Value;
+
     /** @brief Flows the table will hold before refusing to grow. */
     static constexpr std::size_t max_size{Slots / 8 * 7};
 
@@ -281,8 +294,13 @@ public:
         return &values_[index];
     }
 
-    /** @brief Remove `key`, closing the probe chain behind it. */
-    [[nodiscard]] bool erase(const Key& key) noexcept {
+    /**
+     * @brief Remove `key`, closing the probe chain behind it.
+     *
+     * Not `[[nodiscard]]`: erasing a flow you know is there is the ordinary
+     * case, and the return exists for the caller who does not know.
+     */
+    bool erase(const Key& key) noexcept {
         const auto found{locate(key)};
         if (!found) {
             return false;
@@ -373,13 +391,65 @@ template <typename V> [[nodiscard]] constexpr decltype(auto) sink_of(V& value) n
     }
 }
 
+/**
+ * @brief Hand an arrival to a sink, with whatever `route` was given to pass on.
+ *
+ * A sink that does not want the context keeps the one-argument form, so adding
+ * context to a `route` call cannot break a sink that ignores it.
+ */
+template <typename Sink, typename Features, typename... Context> constexpr void deliver(Sink&& sink, const arrival<Features>& a, Context&&... context) {
+    if constexpr (requires { sink.on_datagram(a, context...); }) {
+        sink.on_datagram(a, std::forward<Context>(context)...);
+    } else {
+        static_assert(datagram_sink<std::remove_reference_t<Sink>, Features>, "protocol state behind a flow table value must have on_datagram(const arrival&)");
+        sink.on_datagram(a);
+    }
+}
+
+/**
+ * @brief Run the unmatched callback, reporting whether it took the datagram.
+ *
+ * A callback returning `void` never claims one, which is what the discarding
+ * overload of `route` wants and what every caller written before this did.
+ */
+template <typename Unmatched, typename Features, typename Key>
+[[nodiscard]] constexpr bool claimed(Unmatched&& unmatched, const arrival<Features>& a, const std::optional<Key>& key) {
+    if constexpr (std::same_as<std::invoke_result_t<Unmatched&, const arrival<Features>&, const std::optional<Key>&>, void>) {
+        std::invoke(unmatched, a, key);
+        return false;
+    } else {
+        return static_cast<bool>(std::invoke(unmatched, a, key));
+    }
+}
+
 } // namespace detail
 
 /** @brief What `route` did with one batch. */
 export struct routed {
-    std::size_t delivered{}; ///< datagrams handed to a flow
+    std::size_t slots{};     ///< receive slots walked, coalesced or not
+    std::size_t delivered{}; ///< datagrams handed to an existing flow
+    std::size_t accepted{};  ///< datagrams the `unmatched` callback claimed, by returning `true`
     std::size_t unmatched{}; ///< datagrams with no flow, or no key at all
     std::size_t dropped{};   ///< datagrams that arrived truncated
+
+    /** @brief Datagrams that reached a protocol, however they got there. */
+    [[nodiscard]] constexpr std::size_t handled() const noexcept { return delivered + accepted; }
+
+    /**
+     * @brief Datagrams per slot, which is what `gro` is buying.
+     *
+     * One means the kernel coalesced nothing, and a receive slot sized for a
+     * coalesced buffer is being paid for and not used.
+     *
+     * A truncated slot counts in `slots` and contributes no datagrams, so a
+     * batch that arrived entirely truncated reads as zero rather than one: an
+     * undersized slot is the other way this ratio goes wrong, and it should not
+     * look like a slot that was used.
+     */
+    [[nodiscard]] constexpr double per_slot() const noexcept {
+        const auto seen{handled() + unmatched};
+        return slots == 0 ? 0.0 : static_cast<double>(seen) / static_cast<double>(slots);
+    }
 };
 
 /**
@@ -395,13 +465,15 @@ export struct routed {
  * @param unmatched Called with the arrival when no key or no flow was found;
  *                  where a server decides whether to accept a new connection.
  */
-export template <typename Batch, typename Projection, typename Table, typename Unmatched>
-[[nodiscard]] routed route(const Batch& batch, const Projection& key_of, Table& table, const departure at, Unmatched&& unmatched) {
+export template <typename Batch, typename Projection, typename Table, typename Unmatched, typename... Context>
+    requires key_projection<Projection, typename Batch::features_type>
+[[nodiscard]] routed route(const Batch& batch, const Projection& key_of, Table& table, const departure at, Unmatched&& unmatched, Context&&... context) {
     using features_type = typename Batch::features_type;
 
     routed counts{};
     const auto slots{batch.datagrams()};
     for (const auto& slot : slots) {
+        ++counts.slots;
         if (!slot.intact()) {
             ++counts.dropped;
             continue;
@@ -419,10 +491,11 @@ export template <typename Batch, typename Projection, typename Table, typename U
             const auto key{key_of(a)};
             auto* flow{key ? table.find(*key) : nullptr};
             if (flow != nullptr) {
-                detail::sink_of(*flow).on_datagram(a);
+                detail::deliver(detail::sink_of(*flow), a, context...);
                 ++counts.delivered;
+            } else if (detail::claimed(unmatched, a, key)) {
+                ++counts.accepted;
             } else {
-                std::invoke(unmatched, a, key);
                 ++counts.unmatched;
             }
         }
@@ -432,8 +505,9 @@ export template <typename Batch, typename Projection, typename Table, typename U
 
 /** @brief Route, discarding anything that does not match a known flow. */
 export template <typename Batch, typename Projection, typename Table>
+    requires key_projection<Projection, typename Batch::features_type>
 [[nodiscard]] routed route(const Batch& batch, const Projection& key_of, Table& table, const departure at) {
-    return route(batch, key_of, table, at, [](const auto&, const auto&) noexcept {});
+    return route(batch, key_of, table, at, [](const auto&, const auto&) static noexcept { return false; });
 }
 
 } // namespace dgram

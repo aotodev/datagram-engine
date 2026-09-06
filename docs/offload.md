@@ -37,7 +37,7 @@ buffer reports `MSG_TRUNC` on every datagram and throws away most of the data.
 64 KB is the practical ceiling, so a GRO batch trades capacity for slot size.
 
 ```cpp
-constexpr std::size_t slot_bytes{1 << 16};   // not an MTU
+constexpr std::size_t slot_bytes{dgram::gro::max_coalesced};   // not an MTU
 ```
 
 ## Walking a slot: `segments()`
@@ -87,6 +87,13 @@ ancillary.set<dgram::segment>(1400);
 The buffer may exceed the MTU by a wide margin; the kernel or the NIC slices it
 at the given size, and the final slice is whatever remains. The value is a
 `uint16_t`, not the `int` that `UDP_GRO` reports back.
+
+**A segmented buffer carries one departure time for all of its segments.**
+There is one control message for the buffer, so `txtime` cannot express a
+per-segment departure: the segments leave together and the whole buffer is what
+gets paced. Combining the two features is a choice to pace bursts, and a sender
+that wants per-datagram pacing must not coalesce. See [pacing](pacing.md) for
+the measurement.
 
 ## What the kernel actually does
 

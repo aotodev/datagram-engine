@@ -127,7 +127,48 @@ taken. A short send is not an error and the remainder is dropped: datagram
 delivery is unreliable by definition, so requeueing buys nothing a protocol layer
 cannot do better.
 
+**A failed send leaves the batch staged.** That case is not a short send: nothing
+went out at all, so clearing would hand the caller an empty batch and no way to
+tell what it lost. The argument for dropping a short send's tail is that the
+protocol layer can do better, which is only true while the protocol still has the
+bytes. `EAGAIN` on a non-blocking socket is the ordinary way to get here; flush
+again once the socket is writable, or call `discard()` to drop it.
+
+```cpp
+if (const auto sent{tx->flush(*sock)}; !sent && sent.error() == dgram::would_block) {
+    tx->discard();  // or leave it staged and flush again when writable
+}
+```
+
 ## Retaining bytes past the batch
 
 There is no retention mechanism. A protocol that reassembles or retransmits, as
 QUIC does, copies what it needs out of the payload before the next `receive`.
+
+There is one escape hatch, and it does not reach a protocol.
+`receive_batch::slot(i)` hands out the raw slot, but only a caller walking
+`datagrams()` itself can use it: an `arrival` carries no slot index, so a
+protocol reached through [`route`](demux.md) cannot name the slot its bytes came
+from and has to copy.
+
+**What that copy costs was measured rather than assumed.** For a go-back-N
+protocol over `netem`, 100 datagrams through a send window of eight with a
+reorder buffer of four:
+
+| link | copied / delivered |
+|------|--------------------|
+| loopback, or `fq` | 0% |
+| `loss 10% delay 5ms` | 20% to 32% |
+| the same plus `reorder 25% 50%` | 20% to 35% |
+
+The governing quantity is `min(Window - 1, Reorder)`, not the loss rate: a
+sender does not stop at a gap, so everything behind a lost datagram arrives
+early and has to be held, and a receiver holds at most `Reorder` of it before
+refusing the rest. A protocol that delivers in order and drops what it cannot
+use immediately copies nothing at all, and one with no reorder buffer trades the
+copy for retransmissions instead.
+
+So retention is one side of a trade rather than a cost the engine imposes, and
+it pays only where the *reorder* buffer is large. That argues for an opt-in
+per-batch retention API if one is ever built, not for widening the borrow
+contract every caller pays for.

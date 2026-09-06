@@ -39,7 +39,7 @@ endif()
 include(FetchContent)
 FetchContent_Declare(libmem
     GIT_REPOSITORY https://github.com/aotodev/libmem.git
-    GIT_TAG master
+    GIT_TAG v0.9.0
     SYSTEM
 )
 FetchContent_MakeAvailable(libmem)

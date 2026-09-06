@@ -220,6 +220,53 @@ public:
     /** @brief Longest delay the wheel accepts. */
     [[nodiscard]] constexpr std::chrono::nanoseconds max_delay() const noexcept { return tick_ * static_cast<std::int64_t>(horizon - 1); }
 
+    /**
+     * @brief When the soonest armed timer is due, or nothing when none is.
+     *
+     * What a loop that waits needs and cannot otherwise get: without it a caller
+     * blocking on socket readiness has to either wake every tick or keep its own
+     * copy of every deadline, which is the bookkeeping a wheel exists to remove.
+     *
+     * Every level is searched, because a coarser wheel can hold a nearer
+     * deadline than a finer one: an entry moves down only when a cascade reaches
+     * it, so between cascades it sits at the level its delay warranted when it
+     * was scheduled, not the level its remaining delay warrants now.
+     *
+     * Bounded by `Levels * SlotsPerLevel` slot probes and two chain walks per
+     * level, rather than by how many timers are armed.
+     */
+    [[nodiscard]] std::optional<departure> next_deadline() const noexcept {
+        if (size_ == 0) {
+            return std::nullopt;
+        }
+
+        auto best{no_deadline};
+        for (std::size_t level{}; level < Levels; ++level) {
+            const auto base{level * SlotsPerLevel};
+            const auto cursor{static_cast<std::size_t>((now_tick_ >> (level * slot_bits)) & slot_mask)};
+
+            // The cursor's own slot is the ambiguous one: it holds both the rest
+            // of the current period and whatever wrapped onto it a full
+            // revolution later, and only the stored deadlines separate them.
+            best = std::min(best, soonest_in(heads_[base + cursor]));
+
+            // Every slot ahead of the cursor maps to exactly one period, so they
+            // are in deadline order and the first occupied one is the soonest.
+            for (std::size_t step{1}; step < SlotsPerLevel; ++step) {
+                if (const auto head{heads_[base + ((cursor + step) & slot_mask)]}; head != nil) {
+                    best = std::min(best, soonest_in(head));
+                    break;
+                }
+            }
+        }
+        return best == no_deadline ? std::nullopt : std::optional{at_tick(best)};
+    }
+
+    /** @brief How long until the soonest armed timer, floored at zero. */
+    [[nodiscard]] std::optional<std::chrono::nanoseconds> time_to_next(const departure now) const noexcept {
+        return next_deadline().transform([now](const departure when) { return std::max(std::chrono::nanoseconds::zero(), when - now); });
+    }
+
 private:
     struct entry {
         Payload payload{};
@@ -234,6 +281,20 @@ private:
     timer_wheel() noexcept = default;
 
     [[nodiscard]] std::uint32_t& head_at(const std::size_t level, const std::size_t index) noexcept { return heads_[level * SlotsPerLevel + index]; }
+
+    [[nodiscard]] constexpr departure at_tick(const std::uint64_t tick) const noexcept { return epoch_ + tick_ * static_cast<std::int64_t>(tick); }
+
+    /** @brief No entry on a chain, so nothing to compare; larger than any real deadline. */
+    static constexpr std::uint64_t no_deadline{std::numeric_limits<std::uint64_t>::max()};
+
+    /** @brief The earliest deadline on one slot's chain, which is not ordered. */
+    [[nodiscard]] std::uint64_t soonest_in(const std::uint32_t head) const noexcept {
+        auto best{no_deadline};
+        for (auto current{head}; current != nil; current = entries_[current].next) {
+            best = std::min(best, entries_[current].deadline);
+        }
+        return best;
+    }
 
     /** @brief Ticks since the epoch, rounded up so a timer never fires early. */
     [[nodiscard]] std::uint64_t tick_of(const departure when) const noexcept {

@@ -255,7 +255,16 @@ public:
 
     [[nodiscard]] constexpr std::size_t received() const noexcept { return received_; }
 
-    /** @brief The raw slot behind index `i`, for a caller that retains bytes. */
+    /**
+     * @brief The raw slot behind index `i`, for a caller driving this batch itself.
+     *
+     * **Not reachable from a `route` sink.** An `arrival` carries no index and
+     * nothing else identifying the slot its bytes came from, so a protocol
+     * behind `route` cannot get here and copies instead. This is for a caller
+     * that walks `datagrams()` on its own and still knows which index it is on.
+     *
+     * What copying instead costs has been measured; see docs/batches.md.
+     */
     [[nodiscard]] std::span<std::byte> slot(const std::size_t i) noexcept {
         assert(i < Capacity);
         return payload_.subspan(i * SlotBytes, SlotBytes);
@@ -413,18 +422,27 @@ public:
      * A short send is not an error: `sendmmsg` reports how many it took and the
      * remainder is dropped. Datagram delivery is unreliable by definition, so
      * requeueing the tail buys nothing a protocol layer cannot do better.
+     *
+     * **A failed send is different and the batch is left staged.** Nothing went
+     * out, so clearing would hand the caller an empty batch and no way to know
+     * what it lost, and "a protocol layer can do better" is only true while the
+     * protocol still has the bytes. `EAGAIN` on a non-blocking socket is the
+     * common case: flush again once it is writable, or `discard()` to drop it.
      */
     [[nodiscard]] result<std::size_t> flush(const socket& sock, const int flags = 0) noexcept {
         if (staged_ == 0) {
             return std::size_t{0};
         }
         const int n{::sendmmsg(sock.native(), msgs_.data(), static_cast<unsigned>(staged_), flags)};
-        staged_ = 0;
         if (n < 0) [[unlikely]] {
             return fail<std::size_t>();
         }
+        staged_ = 0;
         return static_cast<std::size_t>(n);
     }
+
+    /** @brief Drop everything staged without sending it, after a failed `flush`. */
+    void discard() noexcept { staged_ = 0; }
 
 private:
     transmit_batch() noexcept = default;

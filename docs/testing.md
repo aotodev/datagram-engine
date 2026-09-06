@@ -18,12 +18,12 @@ checkout.
 |-------|--------|
 | `doc_examples.cpp` | Every snippet printed in `README.md` and `docs/`, compiled and run. A snippet in a document is untested code that looks authoritative; this is what stops one rotting. |
 | `compile_checks.cpp` | Pure `static_assert`. Feature concepts, control-buffer sizing, batch geometry, which resources may be carved from, which metadata is readable. Compiling is the test; it is never run. |
-| `loopback_tests.cpp` | Batch reuse, truncation reporting, nonblocking receive, staging limits, the error combinators. |
+| `loopback_tests.cpp` | Batch reuse, truncation reporting, nonblocking receive, staging limits, a failed flush leaving the batch staged, the error combinators. |
 | `metadata_tests.cpp` | Destination address and ECN over loopback, both families, including a feature that was never enabled and an undersized control buffer. |
 | `malformed_control_tests.cpp` | Control buffers the kernel would never write. Every case here was found by the fuzzer first. |
 | `offload_tests.cpp` | GRO and GSO over loopback, and the segmentation walk on its own: short tail, exact multiple, stride of zero, stride past the end, empty payload. |
-| `demux_tests.cpp` | Key equality and hash agreement (including the flow-label and padding cases), the flow table under churn and at capacity, projections, and routing a GRO slot whose datagrams belong to different flows. |
-| `timer_tests.cpp` | The timing wheel: every delay across every level boundary, stepped one tick at a time and jumped, from several epochs, plus a differential run against a naive reference. |
+| `demux_tests.cpp` | Key equality and hash agreement (including the flow-label and padding cases), the flow table under churn and at capacity, projections, routing a GRO slot whose datagrams belong to different flows, an `unmatched` callback claiming or declining a datagram, arguments forwarded to a sink that takes them and ignored by one that does not, and the per-slot count. |
+| `timer_tests.cpp` | The timing wheel: every delay across every level boundary, stepped one tick at a time and jumped, from several epochs, plus a differential run against a naive reference. `next_deadline` gets its own differential run under churn, the structural case of a timer wrapped onto the cursor's slot, and the property a waiting loop needs: waking at the deadline always finds work. |
 | `pacing_tests.cpp` | The rate arithmetic exhaustively (monotonicity, drift, extreme rates, constexpr), plus what the kernel side allows unprivileged. Real pacing needs `fq` and `CAP_NET_ADMIN`, so no test here asserts a datagram was actually delayed. |
 | `concurrency_tests.cpp` | Several workers, each with its own socket, arena and batches, running concurrently. Meaningful only under `-s thread`. |
 

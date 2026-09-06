@@ -404,4 +404,211 @@ TEST(Route, TruncatedDatagramsAreCountedNotDelivered) {
     EXPECT_EQ(counts.unmatched, 0u);
 }
 
+/* ============================================================================
+ * Accepting a flow, and passing something to the sink
+ *
+ * Both exist because a protocol has to do them and could not: the callback that
+ * accepts a connection had no way to say so, and a sink had no way to be given
+ * anything at the call.
+ * ============================================================================ */
+
+/** A sink that wants somewhere to put what it was given. */
+struct forwarding_recorder {
+    template <typename Features> void on_datagram(const dgram::arrival<Features>& a, std::vector<std::string>& into) {
+        into.emplace_back(reinterpret_cast<const char*>(a.payload.data()), a.payload.size());
+    }
+};
+
+struct routing_fixture {
+    fixture net{};
+    libmem::arena table_arena{dgram::flow_table<dgram::peer_key, recorder*, 64>::footprint()};
+
+    /** Send `text` from `s` and route whatever turns up, returning the counts. */
+    template <typename Table, typename Unmatched, typename... Context>
+    dgram::routed exchange(rx_batch& rx, tx_batch& tx, dgram::socket& s, std::string_view text, Table& table, Unmatched&& unmatched, Context&&... context) {
+        EXPECT_TRUE(tx.stage_copy({reinterpret_cast<const std::byte*>(text.data()), text.size()}, net.target));
+        EXPECT_TRUE(tx.flush(s).has_value());
+
+        for (int attempt{}; attempt < 100; ++attempt) {
+            if (const auto got{rx.receive(net.receiver)}; got && *got > 0) {
+                return dgram::route(rx, dgram::by_peer{}, table, 0ns, unmatched, context...);
+            }
+        }
+        ADD_FAILURE() << "nothing arrived on the loopback";
+        return {};
+    }
+};
+
+TEST(Route, AnUnmatchedCallbackThatClaimsADatagramIsCountedApart) {
+    routing_fixture net{};
+    auto rx{rx_batch::carve(net.net.arena)};
+    auto tx{tx_batch::carve(net.net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    using rec_table = dgram::flow_table<dgram::peer_key, recorder*, 64>;
+    auto table{rec_table::carve(net.table_arena)};
+    ASSERT_TRUE(table.has_value());
+
+    auto stranger{dgram::socket::open<>(dgram::family::inet4)};
+    ASSERT_TRUE(stranger.has_value());
+    ASSERT_TRUE(stranger->bind(dgram::endpoint::any(dgram::family::inet4, 0)).has_value());
+
+    recorder accepted_sink{};
+    const auto counts{net.exchange(*rx, *tx, *stranger, "hello", *table, [&](const auto& a, const auto& key) {
+        if (!key) {
+            return false;
+        }
+        EXPECT_NE(table->insert(*key, &accepted_sink), nullptr);
+        accepted_sink.on_datagram(a);
+        return true;
+    })};
+
+    EXPECT_EQ(counts.accepted, 1u) << "a claimed datagram reached a protocol and must not read as junk";
+    EXPECT_EQ(counts.unmatched, 0u);
+    EXPECT_EQ(counts.delivered, 0u) << "it was not delivered to an existing flow either";
+    EXPECT_EQ(counts.handled(), 1u);
+    EXPECT_EQ(accepted_sink.seen, (std::vector<std::string>{"hello"}));
+}
+
+TEST(Route, AnUnmatchedCallbackThatDeclinesIsStillUnmatched) {
+    routing_fixture net{};
+    auto rx{rx_batch::carve(net.net.arena)};
+    auto tx{tx_batch::carve(net.net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    using rec_table = dgram::flow_table<dgram::peer_key, recorder*, 64>;
+    auto table{rec_table::carve(net.table_arena)};
+    ASSERT_TRUE(table.has_value());
+
+    auto stranger{dgram::socket::open<>(dgram::family::inet4)};
+    ASSERT_TRUE(stranger.has_value());
+    ASSERT_TRUE(stranger->bind(dgram::endpoint::any(dgram::family::inet4, 0)).has_value());
+
+    std::size_t offered{};
+    const auto counts{net.exchange(*rx, *tx, *stranger, "junk", *table, [&](const auto&, const auto&) {
+        ++offered;
+        return false;
+    })};
+    EXPECT_EQ(offered, 1u);
+    EXPECT_EQ(counts.accepted, 0u);
+    EXPECT_EQ(counts.unmatched, 1u);
+}
+
+/* A callback returning void is what every caller wrote before `accepted`
+   existed, and it must keep meaning "I did not take it". */
+TEST(Route, AVoidUnmatchedCallbackNeverClaimsADatagram) {
+    routing_fixture net{};
+    auto rx{rx_batch::carve(net.net.arena)};
+    auto tx{tx_batch::carve(net.net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    using rec_table = dgram::flow_table<dgram::peer_key, recorder*, 64>;
+    auto table{rec_table::carve(net.table_arena)};
+    ASSERT_TRUE(table.has_value());
+
+    auto stranger{dgram::socket::open<>(dgram::family::inet4)};
+    ASSERT_TRUE(stranger.has_value());
+    ASSERT_TRUE(stranger->bind(dgram::endpoint::any(dgram::family::inet4, 0)).has_value());
+
+    std::size_t offered{};
+    const auto counts{net.exchange(*rx, *tx, *stranger, "junk", *table, [&](const auto&, const auto&) { ++offered; })};
+    EXPECT_EQ(offered, 1u);
+    EXPECT_EQ(counts.unmatched, 1u);
+    EXPECT_EQ(counts.accepted, 0u);
+}
+
+TEST(Route, ExtraArgumentsReachASinkThatTakesThem) {
+    routing_fixture net{};
+    auto rx{rx_batch::carve(net.net.arena)};
+    auto tx{tx_batch::carve(net.net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    using fwd_table = dgram::flow_table<dgram::peer_key, forwarding_recorder*, 64>;
+    libmem::arena table_arena{fwd_table::footprint()};
+    auto table{fwd_table::carve(table_arena)};
+    ASSERT_TRUE(table.has_value());
+
+    auto known{dgram::socket::open<>(dgram::family::inet4)};
+    ASSERT_TRUE(known.has_value());
+    ASSERT_TRUE(known->bind(dgram::endpoint::any(dgram::family::inet4, 0)).has_value());
+
+    forwarding_recorder sink{};
+    ASSERT_NE(table->insert(dgram::peer_key{ep("127.0.0.1", known->local_address()->port())}, &sink), nullptr);
+
+    std::vector<std::string> landed{};
+    const auto counts{net.exchange(*rx, *tx, *known, "context", *table, [](const auto&, const auto&) { return false; }, landed)};
+    EXPECT_EQ(counts.delivered, 1u);
+    EXPECT_EQ(landed, (std::vector<std::string>{"context"})) << "the sink took what route was given, without holding it";
+}
+
+/* The fallback: passing context to a sink that does not want it is not an
+   error, so adding an argument at one call site cannot break another sink. */
+TEST(Route, ASinkThatIgnoresExtraArgumentsStillCompiles) {
+    routing_fixture net{};
+    auto rx{rx_batch::carve(net.net.arena)};
+    auto tx{tx_batch::carve(net.net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    using rec_table = dgram::flow_table<dgram::peer_key, recorder*, 64>;
+    auto table{rec_table::carve(net.table_arena)};
+    ASSERT_TRUE(table.has_value());
+
+    auto known{dgram::socket::open<>(dgram::family::inet4)};
+    ASSERT_TRUE(known.has_value());
+    ASSERT_TRUE(known->bind(dgram::endpoint::any(dgram::family::inet4, 0)).has_value());
+
+    recorder sink{};
+    ASSERT_NE(table->insert(dgram::peer_key{ep("127.0.0.1", known->local_address()->port())}, &sink), nullptr);
+
+    std::vector<std::string> ignored{};
+    const auto counts{net.exchange(*rx, *tx, *known, "plain", *table, [](const auto&, const auto&) { return false; }, ignored)};
+    EXPECT_EQ(counts.delivered, 1u);
+    EXPECT_TRUE(ignored.empty());
+    EXPECT_EQ(sink.seen, (std::vector<std::string>{"plain"}));
+}
+
+/* Coalescing is invisible to a receive loop by design, which also means a caller
+   paying for 64 KiB slots has no way to tell whether it is getting anything for
+   them. `slots` is that way. */
+TEST(Route, ReportsHowManySlotsTheDatagramsCameIn) {
+    fixture net{};
+    auto rx{rx_batch::carve(net.arena)};
+    auto tx{tx_batch::carve(net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    auto sender{dgram::socket::open<>(dgram::family::inet4)};
+    ASSERT_TRUE(sender.has_value());
+    ASSERT_TRUE(sender->bind(dgram::endpoint::any(dgram::family::inet4, 0)).has_value());
+
+    using rec_table = dgram::flow_table<dgram::peer_key, recorder*, 64>;
+    libmem::arena table_arena{rec_table::footprint()};
+    auto table{rec_table::carve(table_arena)};
+    ASSERT_TRUE(table.has_value());
+
+    recorder sink{};
+    ASSERT_NE(table->insert(dgram::peer_key{ep("127.0.0.1", sender->local_address()->port())}, &sink), nullptr);
+
+    // One send, segmented into four: the kernel may coalesce them back or not.
+    constexpr std::uint16_t stride{100};
+    std::vector<std::byte> payload(4 * stride, std::byte{'x'});
+    dgram::control<tx_set> ancillary{};
+    (void)ancillary.set<dgram::segment>(stride);
+    ASSERT_TRUE(tx->stage_copy(payload, net.target, ancillary));
+    ASSERT_TRUE(tx->flush(*sender).has_value());
+
+    dgram::routed counts{};
+    for (int attempt{}; attempt < 100 && counts.handled() < 4; ++attempt) {
+        if (const auto got{rx->receive(net.receiver)}; got && *got > 0) {
+            const auto pass{dgram::route(*rx, dgram::by_peer{}, *table, 0ns)};
+            counts.slots += pass.slots;
+            counts.delivered += pass.delivered;
+        }
+    }
+
+    ASSERT_EQ(counts.handled(), 4u);
+    EXPECT_GT(counts.slots, 0u);
+    EXPECT_LE(counts.slots, 4u);
+    EXPECT_GE(counts.per_slot(), 1.0) << "every slot walked yielded at least one datagram";
+}
+
 } // namespace

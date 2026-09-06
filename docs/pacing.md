@@ -32,7 +32,7 @@ auto sock{dgram::socket::open<dgram::transmit_time<>>(dgram::family::inet4)};
 |-----------|---------|---------|
 | `Clock` | `txtime_clock::monotonic` | Which clock departure times are on. |
 | `Deadline` | `false` | `true` means "no later than" rather than "at", letting the qdisc reorder. |
-| `ReportErrors` | `true` | Route missed and malformed departures to the error queue. |
+| `ReportErrors` | `true` | Route missed and malformed departures to the error queue, where `etf` puts them and `fq` does not. |
 
 **`CLOCK_TAI` requires `CAP_NET_ADMIN`** and fails with `EPERM` otherwise, which
 is why `monotonic` is the default. Reach for `tai` when departure times are
@@ -41,6 +41,12 @@ shared between machines, since it does not step.
 `dgram::pacing_clock` is `std::chrono::steady_clock`, which is `CLOCK_MONOTONIC`
 on this platform. `now_on(clock)` reads whichever clock the socket was configured
 with.
+
+**The socket option is not conditional.** `transmit_time<>` is chosen when the
+socket is opened, so a node that may or may not pace either decides at open time
+or carries `SO_TXTIME` always and omits the `txtime` control message per
+datagram. The second works and is the usual answer; there is no way to add the
+option later.
 
 ## Attaching a departure time
 
@@ -57,6 +63,19 @@ ancillary.set<dgram::txtime>(when);
 
 The control message type and the socket option share a value
 (`SCM_TXTIME == SO_TXTIME == 61`). That is the kernel's own aliasing.
+
+**With `segment`, one departure covers every segment in the buffer.** The
+kernel is handed one buffer, one control message and slices it, so there is
+nowhere to put a per-segment departure time. Pacing granularity becomes the
+buffer, and a coalesced buffer leaves as a burst: measured at a nominal 10 ms
+per datagram under `fq`, one datagram per buffer spreads them 9.2 ms to 10.7 ms
+apart, while seven segments per buffer put 1.2 us between segments and 70.9 ms
+between buffers. The total spread is the same, which is why a test measuring
+first arrival against last cannot tell the two apart.
+
+That is not a defect in either feature, but it is the opposite of the reason
+for pacing given at the top of this page: a sender that wants per-datagram
+pacing must not coalesce. See [segmentation offload](offload.md).
 
 ## Computing the departure: `pacer`
 
@@ -101,9 +120,30 @@ if (const auto fault{dgram::drain_transmit_error(sock.native())}; fault && *faul
 }
 ```
 
-An empty queue is a success with no value, not an error. This only ever reports
-anything once `fq` is in place; with no queueing discipline there is nothing to
-miss a deadline.
+An empty queue is a success with no value, not an error.
+
+**`fq` never reports anything here, and neither does no discipline at all.**
+The two queueing disciplines that honour `SO_TXTIME` do different things with a
+departure they cannot meet: `fq` holds what it can and silently drops the rest,
+including anything past its `horizon` (10 s by default, with `horizon_drop` on),
+while `etf` answers on the error queue. Nothing in `fq` calls
+`SO_EE_ORIGIN_TXTIME`, so a program that follows the pacing advice above and
+then waits for a fault waits forever.
+
+`etf` is stricter in exchange: it insists its own clock matches the socket's, and
+it wants `CLOCK_TAI`, which needs `CAP_NET_ADMIN`. A datagram from a socket on
+another clock is refused before its departure time is even looked at, and the
+refusal is what arrives on the error queue.
+
+| Discipline | Honours a departure | Reports one it refuses |
+|------------|---------------------|------------------------|
+| none | no, silently | no |
+| `fq` | yes | **no** |
+| `etf` | yes | yes, as `invalid_departure` or `missed_deadline` |
+
+So `ReportErrors` is worth setting either way, since it costs nothing when
+nothing reports, but treat a quiet error queue under `fq` as no information
+rather than as confirmation that pacing is working.
 
 ## Pacing is not a timer
 

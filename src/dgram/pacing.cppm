@@ -67,8 +67,9 @@ export [[nodiscard]] inline departure now_on(const txtime_clock clock) noexcept 
  *
  * `Deadline` switches the kernel from "send at this time" to "send no later
  * than this time", which lets the qdisc reorder. `ReportErrors` routes missed
- * and malformed departures to the error queue, where `drain_transmit_errors`
- * finds them; without it they are dropped silently.
+ * and malformed departures to the error queue, where `drain_transmit_error`
+ * finds them; without it they are dropped silently. Only `etf` puts anything
+ * there, so under `fq` this option is free and inert.
  *
  * @warning This option succeeding does **not** mean pacing works. The interface
  *          must carry the Fair Queue discipline:
@@ -100,6 +101,10 @@ export template <txtime_clock Clock = txtime_clock::monotonic, bool Deadline = f
  * @brief `SCM_TXTIME`: when this datagram should leave.
  *
  * Send-only, per datagram, so one batch can mix paced and unpaced entries.
+ *
+ * Per datagram means per staged entry: a `segment`ed buffer is one entry, so
+ * one departure covers all of its segments and pacing granularity becomes the
+ * buffer rather than the datagram. See docs/pacing.md.
  *
  * The control message type and the socket option share a value
  * (`SCM_TXTIME == SO_TXTIME == 61`); that is the kernel's own aliasing, not a
@@ -212,8 +217,14 @@ export enum class pacing_fault : std::uint8_t {
  * @brief Drain one entry from the error queue, if any.
  *
  * Only populated when `transmit_time` was configured with `ReportErrors`, and
- * only meaningful once the interface carries `fq`: with no queueing discipline
- * the kernel ignores departure times without reporting anything at all.
+ * then only under a discipline that reports: **`fq` never does.** It honours a
+ * departure time and drops what it cannot queue, including anything past its
+ * `horizon`, without a word anywhere. `etf` is the discipline that answers here,
+ * at the price of insisting its clock matches the socket's and wanting
+ * `CLOCK_TAI`, which needs `CAP_NET_ADMIN`.
+ *
+ * An empty queue under `fq` is therefore no information at all, and in
+ * particular is not evidence that pacing is working. See docs/pacing.md.
  *
  * @return The fault, or nothing when the queue is empty. `would_block` is not an
  *         error here and is reported as an empty queue.

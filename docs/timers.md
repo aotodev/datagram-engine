@@ -42,6 +42,8 @@ on the first tick **at or after** its deadline, never before.
 | `timer_handle schedule(payload, when)` | Arm a timer. Invalid handle if full or beyond `max_delay()`. |
 | `bool cancel(handle)` | `false` if it already fired or the handle is stale, neither an error. |
 | `size_t advance(now, fire)` | Fire everything due, oldest tick first. Returns how many. |
+| `optional<departure> next_deadline()` | When the soonest armed timer is due, or nothing. |
+| `optional<nanoseconds> time_to_next(now)` | The same, as a wait, floored at zero. |
 | `departure current()` | The instant the wheel has advanced to. |
 | `nanoseconds max_delay()` | Longest delay accepted. |
 
@@ -54,7 +56,29 @@ const auto now{dgram::now_on(dgram::txtime_clock::monotonic)};
 
 Drive it once per loop iteration, next to `receive`.
 
-**Rescheduling from inside the callback is safe and expected** — a
+## Waiting on it
+
+A loop that blocks on a socket has to wake for whichever comes first, so it
+needs to know when the wheel next wants attention:
+
+```cpp
+const auto limit{timers.time_to_next(now).value_or(budget)};
+::ppoll(&fd, 1, &as_timespec(std::min(budget, limit)), nullptr);
+```
+
+Without this a caller has only two options, and both are worse: wake on a fixed
+tick and burn a syscall whether or not anything is due, or keep a parallel copy
+of every deadline alongside the wheel, which is the bookkeeping the wheel exists
+to remove.
+
+`next_deadline` searches every level, not just the finest. A timer moves down a
+level only when a cascade reaches it, so between cascades it sits at the level
+its delay warranted when it was scheduled rather than the level its *remaining*
+delay warrants now, and a coarse wheel can therefore hold a nearer deadline than
+a fine one. The cost is `Levels * SlotsPerLevel` slot probes and two chain walks
+per level, independent of how many timers are armed.
+
+**Rescheduling from inside the callback is safe and expected:** a
 retransmission timer that fires arms the next one. A timer scheduled for a tick
 already passed fires on the *next* `advance`, not recursively during this one, so
 a rearming timer cannot spin the loop.
