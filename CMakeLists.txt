@@ -52,9 +52,17 @@ if(DGRAM_INSTALL)
     set(LIBMEM_INSTALL ON CACHE BOOL "" FORCE)
 endif()
 
+# A static libmem linked into libdgram.so has to be position independent.
+if(BUILD_SHARED_LIBS)
+    set(LIBMEM_PIC ON CACHE BOOL "" FORCE)
+endif()
+
 FetchContent_MakeAvailable(libmem)
 
-add_library(dgram STATIC)
+# Type from BUILD_SHARED_LIBS. Visibility stays default: hiding it would mean
+# annotating exported entities across twelve module interfaces, and a consumer
+# compiles those interfaces itself either way. See docs/integration.md.
+add_library(dgram)
 add_library(dgram::dgram ALIAS dgram)
 
 set_target_properties(dgram PROPERTIES
@@ -63,6 +71,8 @@ set_target_properties(dgram PROPERTIES
     CXX_EXTENSIONS OFF
     CXX_MODULE_STD ON
     CXX_SCAN_FOR_MODULES ON
+    VERSION   ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
 )
 
 target_sources(dgram

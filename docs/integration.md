@@ -55,6 +55,23 @@ below applies to a `find_package` build exactly as it does to a fetched one.
 consumer names one package rather than two. Version compatibility is
 `SameMinorVersion`: before 1.0 a minor bump is a break.
 
+## Static or shared
+
+`BUILD_SHARED_LIBS` picks the type, as it does for any CMake library. Shared
+gets a soname (`libdgram.so.0.9`), and `libmem` is forced position independent so
+a static one can still land inside it.
+
+**Upgrade the library and the consumer together.** A consumer compiles the
+installed module interfaces itself, so templates and inline entities are baked
+into its own objects while the rest come from the library. Dropping in a
+different `libdgram.so` against objects built from the old interfaces is an ODR
+mismatch that nothing diagnoses. The soname is not an ABI promise: there is no
+version script and no ABI discipline for module-attached entities yet.
+
+Symbol visibility is left at the default rather than hidden. Hiding it would mean
+annotating exported entities across twelve module interfaces, and it would buy a
+smaller symbol table on a library whose consumers compile most of it anyway.
+
 ## Requirements
 
 GCC >= 16, CMake >= 3.30, Ninja, Linux. The engine is built on `recvmmsg`,
