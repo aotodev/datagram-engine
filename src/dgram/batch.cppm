@@ -76,8 +76,11 @@ export template <feature_set Features = no_features> class datagram {
 public:
     explicit constexpr datagram(const ::mmsghdr& raw) noexcept : raw_{&raw} {}
 
+    /** @brief The received bytes, never longer than the slot. */
     [[nodiscard]] std::span<const std::byte> payload() const noexcept {
-        return {static_cast<const std::byte*>(raw_->msg_hdr.msg_iov[0].iov_base), raw_->msg_len};
+        // A caller-supplied MSG_TRUNC makes msg_len the wire length, not what was copied.
+        const auto& iov{raw_->msg_hdr.msg_iov[0]};
+        return {static_cast<const std::byte*>(iov.iov_base), std::min<std::size_t>(raw_->msg_len, iov.iov_len)};
     }
 
     [[nodiscard]] const endpoint& from() const noexcept { return *static_cast<const endpoint*>(raw_->msg_hdr.msg_name); }

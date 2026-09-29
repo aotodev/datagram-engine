@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 #include <gtest/gtest.h>
 
+#include <sys/socket.h>
+
 import std;
 import libmem;
 import dgram;
@@ -140,6 +142,25 @@ TEST(Loopback, ReportsTruncationRatherThanCorrupting) {
     const auto d{*view.begin()};
     EXPECT_TRUE(d.truncated()) << "an oversized datagram must not look intact";
     EXPECT_FALSE(d.intact());
+    EXPECT_EQ(d.payload().size(), 8u);
+}
+
+/* With MSG_TRUNC in the receive flags the kernel reports the wire length in
+   msg_len, which exceeds the slot. The payload view must still stop at the slot. */
+TEST(Loopback, CallerMsgTruncDoesNotStretchThePayloadPastTheSlot) {
+    using tiny_rx = dgram::receive_batch<4, 8>;
+    loopback net{};
+    auto rx{tiny_rx::carve(net.arena)};
+    auto tx{tx_batch::carve(net.arena)};
+    ASSERT_TRUE(rx.has_value());
+    ASSERT_TRUE(tx.has_value());
+
+    ASSERT_TRUE(tx->stage_copy(bytes_of("far longer than eight bytes"), net.target));
+    ASSERT_TRUE(tx->flush(net.sender).has_value());
+
+    ASSERT_EQ(*rx->receive(net.receiver, MSG_TRUNC), 1u);
+    const auto d{*rx->datagrams().begin()};
+    EXPECT_TRUE(d.truncated());
     EXPECT_EQ(d.payload().size(), 8u);
 }
 

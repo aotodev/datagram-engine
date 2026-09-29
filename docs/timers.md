@@ -81,7 +81,8 @@ per level, independent of how many timers are armed.
 **Rescheduling from inside the callback is safe and expected:** a
 retransmission timer that fires arms the next one. A timer scheduled for a tick
 already passed fires on the *next* `advance`, not recursively during this one, so
-a rearming timer cannot spin the loop.
+a rearming timer cannot spin the loop. Cancelling from the callback is safe too,
+including a timer due on the same tick that has not fired yet.
 
 ## Handles are generation-checked
 

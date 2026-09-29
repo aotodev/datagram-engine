@@ -272,6 +272,51 @@ TEST(TimerWheel, ReschedulingFromTheCallbackIsSafe) {
     EXPECT_EQ(f.w.size(), 0u);
 }
 
+/* Timers of one connection often share a tick, and the first to fire cancels the
+   rest. Those are still waiting in the slot being drained. */
+TEST(TimerWheel, CancellingATimerDueOnTheSameTickFromTheCallbackIsSafe) {
+    fixture f{};
+    const std::array handles{f.w.schedule(1, 5ms), f.w.schedule(2, 5ms), f.w.schedule(3, 5ms)};
+    ASSERT_TRUE(std::ranges::all_of(handles, &dgram::timer_handle::valid));
+
+    std::size_t cancelled{};
+    const auto fired{f.w.advance(5ms, [&](const std::uint32_t id) {
+        for (const auto [other, handle] : std::views::zip(std::views::iota(1U), handles)) {
+            if (other != id && f.w.cancel(handle)) {
+                ++cancelled;
+            }
+        }
+    })};
+    EXPECT_EQ(fired, 1u) << "the first to fire cancelled the other two";
+    EXPECT_EQ(cancelled, 2u);
+    EXPECT_EQ(f.w.size(), 0u);
+}
+
+/* Rearming reuses the entry that just fired, so a stale link to it from the slot
+   being drained would reach whichever chain the new timer joined. */
+TEST(TimerWheel, RearmingThenCancellingASiblingKeepsOtherSlotsIntact) {
+    fixture f{};
+    const std::array handles{f.w.schedule(1, 5ms), f.w.schedule(2, 5ms), f.w.schedule(3, 5ms)};
+    ASSERT_TRUE(f.w.schedule(4, 8ms).valid());
+
+    std::vector<std::uint32_t> fired{};
+    bool rearmed{};
+    (void)f.w.advance(5ms, [&](const std::uint32_t id) {
+        fired.push_back(id);
+        if (!std::exchange(rearmed, true)) {
+            EXPECT_TRUE(f.w.schedule(30, 8ms).valid());
+            for (const auto handle : handles) {
+                (void)f.w.cancel(handle);
+            }
+        }
+    });
+    auto later{fire_all(f.w, 20ms)};
+    std::ranges::sort(later);
+    EXPECT_EQ(fired.size(), 1u);
+    EXPECT_EQ(later, (std::vector<std::uint32_t>{4, 30}));
+    EXPECT_EQ(f.w.size(), 0u);
+}
+
 TEST(TimerWheel, ManyTimersOnOneTickAllFire) {
     fixture f{};
     for (std::uint32_t i{}; i < 100; ++i) {

@@ -376,23 +376,23 @@ private:
         }
     }
 
-    /** @brief Fire and free everything in one slot. */
+    /**
+     * @brief Fire and free everything in one slot.
+     *
+     * Pops one entry per callback rather than detaching the chain, so a callback
+     * that cancels a timer still waiting here unlinks it from a consistent list.
+     * Relies on nothing scheduled from the callback landing in this slot: a
+     * level-0 delay is 1 to `SlotsPerLevel - 1` ticks, never a full revolution.
+     */
     template <typename Fire> std::size_t drain(std::uint32_t& head, Fire&& fire) {
-        // Detach first: the callback may schedule, which must not touch this chain.
-        auto current{head};
-        head = nil;
         std::size_t fired{};
-
-        while (current != nil) {
-            const auto next{entries_[current].next};
-            auto& e{entries_[current]};
-            e.next = nil;
-            e.prev = nil;
-            const auto payload{e.payload};
-            release(current);
+        while (head != nil) {
+            const auto index{head};
+            unlink(index);
+            const auto payload{entries_[index].payload};
+            release(index);
             std::invoke(fire, payload);
             ++fired;
-            current = next;
         }
         return fired;
     }
