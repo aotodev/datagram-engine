@@ -18,7 +18,7 @@ set(CMAKE_CXX_MODULE_STD ON)
 include(FetchContent)
 FetchContent_Declare(datagram-engine
     GIT_REPOSITORY https://github.com/aotodev/datagram-engine.git
-    GIT_TAG v0.9.2
+    GIT_TAG v0.10.0
     SYSTEM
 )
 FetchContent_MakeAvailable(datagram-engine)
@@ -71,7 +71,7 @@ enable_experimental_std()
 project(my_project LANGUAGES CXX)
 set(CMAKE_CXX_MODULE_STD ON)
 
-find_package(dgram 0.9.0 REQUIRED)
+find_package(dgram 0.10.0 REQUIRED)
 target_link_libraries(my_target PRIVATE dgram::dgram)
 ```
 
@@ -105,7 +105,7 @@ consumer names one package rather than two. Version compatibility is
 ## Static or shared
 
 `BUILD_SHARED_LIBS` picks the type, as it does for any CMake library. Shared
-gets a soname (`libdgram.so.0.9`), and `libmem` is forced position independent so
+gets a soname (`libdgram.so.0.10`), and `libmem` is forced position independent so
 a static one can still land inside it.
 
 **Upgrade the library and the consumer together.** A consumer compiles the

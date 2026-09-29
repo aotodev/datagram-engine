@@ -5,7 +5,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(enable_standard_modules)
 enable_experimental_std()
 
-project(datagram_engine VERSION 0.9.2 LANGUAGES CXX)
+project(datagram_engine VERSION 0.10.0 LANGUAGES CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "datagram-engine is Linux-only: it is built on recvmmsg, cmsg, GRO/GSO and SO_TXTIME.")
@@ -44,9 +44,9 @@ endif()
 include(FetchContent)
 FetchContent_Declare(libmem
     GIT_REPOSITORY https://github.com/aotodev/libmem.git
-    GIT_TAG v0.9.1
+    GIT_TAG v0.10.0
     SYSTEM
-    FIND_PACKAGE_ARGS 0.9.1
+    FIND_PACKAGE_ARGS 0.10.0
 )
 
 # A fetched libmem has no export set of its own, and install(EXPORT) refuses a
