@@ -12,6 +12,7 @@ export import :demux;
 export import :cmsg;
 export import :error;
 export import :feature;
+export import :hash;
 export import :metadata;
 export import :offload;
 export import :pacing;

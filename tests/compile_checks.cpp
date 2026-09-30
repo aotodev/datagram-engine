@@ -194,8 +194,55 @@ static_assert(std::is_trivially_destructible_v<dgram::flow_key>);
 
 using demux_table_type = dgram::flow_table<dgram::peer_key, int, 64>;
 static_assert(dgram::flow_lookup<demux_table_type, dgram::peer_key, int>);
-static_assert(demux_table_type::max_size == 56, "seven eighths of the slots, so probing stays bounded");
+static_assert(demux_table_type::max_size == 48, "three quarters of the slots, so probing stays bounded");
 static_assert(demux_table_type::max_size < 64, "an open-addressed table must never be allowed to fill");
+
+/* ============================================================================
+ * Keyed hashing
+ * ============================================================================ */
+
+/* The reference key and messages: bytes 00 01 02 ... */
+constexpr dgram::hash_seed reference_seed{0x0706050403020100ULL, 0x0F0E0D0C0B0A0908ULL};
+
+template <int C, int D> consteval std::uint64_t sip_of_prefix(const std::size_t n, const std::size_t chunk = 64) {
+    std::array<std::byte, 64> message{};
+    for (std::size_t i{}; i < message.size(); ++i) {
+        message[i] = static_cast<std::byte>(i);
+    }
+    dgram::basic_siphash<C, D> h{reference_seed};
+    for (std::size_t at{}; at < n; at += chunk) {
+        h(std::span<const std::byte>{message}.subspan(at, std::min(chunk, n - at)));
+    }
+    return h.finish();
+}
+
+/* The published SipHash-2-4 vectors pin the round function. */
+static_assert(sip_of_prefix<2, 4>(0) == 0x726FDB47DD0E0E31ULL);
+static_assert(sip_of_prefix<2, 4>(1) == 0x74F839C593DC67FDULL);
+static_assert(sip_of_prefix<2, 4>(15) == 0xA129CA6149BE45E5ULL);
+
+/* SipHash-1-3, the variant the table uses, around every word boundary. */
+static_assert(dgram::siphash{reference_seed}.finish() == 0xABAC0158050FC4DCULL);
+static_assert(sip_of_prefix<1, 3>(1) == 0xC9F49BF37D57CA93ULL);
+static_assert(sip_of_prefix<1, 3>(7) == 0xD3927D989BB11140ULL);
+static_assert(sip_of_prefix<1, 3>(8) == 0x369095118D299A8EULL);
+static_assert(sip_of_prefix<1, 3>(9) == 0x25A48EB36C063DE4ULL);
+static_assert(sip_of_prefix<1, 3>(15) == 0xD320D86D2A519956ULL);
+static_assert(sip_of_prefix<1, 3>(16) == 0xCC4FDD1A7D908B66ULL);
+static_assert(sip_of_prefix<1, 3>(63) == 0x9D199062B7BBB3A8ULL);
+
+/* Streaming: how the bytes are split must not change the digest. */
+static_assert(sip_of_prefix<1, 3>(63, 1) == sip_of_prefix<1, 3>(63));
+static_assert(sip_of_prefix<1, 3>(63, 3) == sip_of_prefix<1, 3>(63));
+static_assert(sip_of_prefix<1, 3>(63, 13) == sip_of_prefix<1, 3>(63));
+
+/* A key hashed the old way, with only a hash_value, is not a demux key. */
+struct unkeyed {
+    int id{};
+    friend bool operator==(const unkeyed&, const unkeyed&) = default;
+    friend std::size_t hash_value(const unkeyed& k) noexcept { return static_cast<std::size_t>(k.id); }
+};
+static_assert(!dgram::demux_key<unkeyed>);
 
 /* A sink is anything that can take an arrival, and nothing more. */
 struct minimal_sink {

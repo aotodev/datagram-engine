@@ -93,13 +93,39 @@ and comparing it would make the same peer look new on every datagram, filling a
 table with duplicates. Scope *is* identity, since `fe80::1%eth0` and
 `fe80::1%eth1` are different destinations.
 
+### Your own key type
+
+A `demux_key` is equality-comparable, trivially destructible, and has a
+`hash_append` that feeds its identity to a hasher:
+
+```cpp
+struct session_key {
+    dgram::endpoint peer{};
+    std::uint32_t epoch{};
+
+    friend bool operator==(const session_key&, const session_key&) = default;
+
+    template <dgram::byte_hasher H> friend void hash_append(H& h, const session_key& k) noexcept {
+        hash_append(h, k.peer);
+        hash_append(h, k.epoch);
+    }
+};
+```
+
+Feed exactly the fields `operator==` compares, in an encoding where no key's
+bytes are a prefix of another's. The provided keys already are: an endpoint's
+family fixes its width, and a `byte_key` feeds its length first. Two unequal keys
+that feed the same bytes collide under every seed, which is the one collision
+seeding cannot fix.
+
 ## The table
 
 ```cpp
 using table = dgram::flow_table<dgram::peer_key, connection*, 1024>;
 
 libmem::arena arena{table::footprint()};
-auto flows{table::carve(arena)};
+auto flows{table::carve(arena)};                  // seed from getrandom
+auto pinned{table::carve(arena, dgram::hash_seed{k0, k1})};
 ```
 
 Open addressing with linear probing and backward-shift deletion, carved from a
@@ -107,7 +133,9 @@ resource like everything else. `Slots` must be a power of two.
 
 | Member | Description |
 |--------|-------------|
-| `max_size` | Flows it will hold: seven eighths of `Slots`. |
+| `static result<table> carve(R& resource, hash_seed seed)` | Take the memory; buckets are SipHash-1-3 under `seed`. |
+| `static result<table> carve(R& resource)` | Same, with a seed from `random_seed()`. Fails only if `getrandom` does. |
+| `max_size` | Flows it will hold: three quarters of `Slots`. |
 | `Value* find(key)` | The flow, or `nullptr`. |
 | `Value* insert(key, value)` | Inserts or overwrites. Points at the stored value; `nullptr` means the table was full. |
 | `bool erase(key)` | `false` if it was not there, which is not an error. Not `[[nodiscard]]`. |
@@ -117,6 +145,14 @@ resource like everything else. `Slots` must be a power of two.
 rather than degrading: a nearly full open-addressed table turns every lookup
 into a linear scan. Size `Slots` for the peak flow count you intend to serve and
 treat a refusal as backpressure.
+
+**Keys are attacker-chosen, so the hash is keyed.** A peer picks its source port,
+most of an IPv6 address, and a QUIC client its own Initial connection id. Under
+an unkeyed hash it could pick keys that share a bucket and turn every lookup into
+a walk of one long probe chain. Each table hashes with SipHash-1-3 under its own
+128-bit seed, so the layout is unpredictable and keys that collide in one table
+spread in another. Pass a fixed seed only where reproducibility matters more,
+such as tests and fuzzers, and never one a peer can learn.
 
 Backward-shift deletion means no tombstones, so a long-lived table that churns
 connections does not slowly fill with dead markers.
