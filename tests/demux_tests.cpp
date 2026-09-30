@@ -29,6 +29,14 @@ dgram::endpoint ep(const char* text, std::uint16_t port, dgram::family fam = dgr
     return *dgram::endpoint::parse(fam, text, port);
 }
 
+constexpr dgram::hash_seed test_seed{0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL};
+
+template <typename K> std::uint64_t hash_of(const K& k, const dgram::hash_seed seed = test_seed) {
+    dgram::siphash h{seed};
+    hash_append(h, k);
+    return h.finish();
+}
+
 /** Records what it was given, so routing can be asserted on. */
 struct recorder {
     std::vector<std::string> seen{};
@@ -44,8 +52,8 @@ struct recorder {
 
 TEST(EndpointKey, EqualEndpointsHashEqual) {
     EXPECT_EQ(ep("192.0.2.1", 443), ep("192.0.2.1", 443));
-    EXPECT_EQ(hash_value(ep("192.0.2.1", 443)), hash_value(ep("192.0.2.1", 443)));
-    EXPECT_EQ(std::hash<dgram::endpoint>{}(ep("192.0.2.1", 443)), hash_value(ep("192.0.2.1", 443)));
+    EXPECT_EQ(hash_of(ep("192.0.2.1", 443)), hash_of(ep("192.0.2.1", 443)));
+    EXPECT_EQ(std::hash<dgram::endpoint>{}(ep("192.0.2.1", 443)), std::hash<dgram::endpoint>{}(ep("192.0.2.1", 443)));
 }
 
 TEST(EndpointKey, DistinctEndpointsAreNotEqual) {
@@ -63,7 +71,7 @@ TEST(EndpointKey, FlowLabelIsNotIdentity) {
     reinterpret_cast<::sockaddr_in6&>(b.mutable_storage()).sin6_flowinfo = 0x12345678;
 
     EXPECT_EQ(a, b) << "a flow label does not identify a peer";
-    EXPECT_EQ(hash_value(a), hash_value(b)) << "the hash must agree with equality";
+    EXPECT_EQ(hash_of(a), hash_of(b)) << "the hash must agree with equality";
 }
 
 /* Scope, unlike flow label, is identity: fe80::1%eth0 is not fe80::1%eth1. */
@@ -73,7 +81,7 @@ TEST(EndpointKey, ScopeIdIsIdentity) {
     reinterpret_cast<::sockaddr_in6&>(b.mutable_storage()).sin6_scope_id = 3;
 
     EXPECT_NE(a, b);
-    EXPECT_NE(hash_value(a), hash_value(b));
+    EXPECT_NE(hash_of(a), hash_of(b));
 }
 
 /* v4 sockaddrs carry eight bytes of sin_zero padding that must not be compared. */
@@ -84,7 +92,7 @@ TEST(EndpointKey, V4PaddingIsNotIdentity) {
     std::memset(raw.sin_zero, 0xAB, sizeof(raw.sin_zero));
 
     EXPECT_EQ(a, b);
-    EXPECT_EQ(hash_value(a), hash_value(b));
+    EXPECT_EQ(hash_of(a), hash_of(b));
 }
 
 TEST(ByteKey, ComparesAndHashesByContent) {
@@ -97,9 +105,57 @@ TEST(ByteKey, ComparesAndHashesByContent) {
     const dgram::byte_key<8> c{other};
 
     EXPECT_EQ(a, b);
-    EXPECT_EQ(hash_value(a), hash_value(b));
+    EXPECT_EQ(hash_of(a), hash_of(b));
     EXPECT_NE(a, c);
     EXPECT_EQ(a.bytes().size(), 4u);
+}
+
+/* The length goes in first, so a short key followed by more fields cannot feed
+   the same bytes as a longer key followed by fewer. */
+TEST(ByteKey, FeedsItsLengthSoCompositesStayDistinct) {
+    const std::array<std::byte, 2> ab{std::byte{'a'}, std::byte{'b'}};
+    const std::array<std::byte, 3> abc{std::byte{'a'}, std::byte{'b'}, std::byte{'c'}};
+    const std::array<std::byte, 1> c{std::byte{'c'}};
+
+    dgram::siphash split{test_seed};
+    hash_append(split, dgram::byte_key<4>{ab});
+    hash_append(split, dgram::byte_key<4>{c});
+    dgram::siphash joined{test_seed};
+    hash_append(joined, dgram::byte_key<4>{abc});
+    hash_append(joined, dgram::byte_key<4>{});
+    EXPECT_NE(split.finish(), joined.finish());
+}
+
+TEST(KeyedHash, TheSeedChangesTheDigest) {
+    const dgram::peer_key k{ep("192.0.2.1", 443)};
+    EXPECT_NE(hash_of(k, test_seed), hash_of(k, dgram::hash_seed{1, 2}));
+}
+
+TEST(KeyedHash, RandomSeedsDiffer) {
+    const auto a{dgram::random_seed()};
+    const auto b{dgram::random_seed()};
+    ASSERT_TRUE(a.has_value() && b.has_value());
+    EXPECT_NE(*a, *b);
+}
+
+/* The flooding case: keys chosen to share a bucket under one seed. Under another
+   seed they must spread, or a peer that learns one table's layout owns them all. */
+TEST(KeyedHash, KeysCraftedToCollideUnderOneSeedSpreadUnderAnother) {
+    constexpr std::size_t buckets{64};
+    std::vector<dgram::peer_key> crafted{};
+    for (std::uint32_t port{1}; crafted.size() < 32 && port <= 0xFFFF; ++port) {
+        const dgram::peer_key k{ep("192.0.2.1", static_cast<std::uint16_t>(port))};
+        if ((hash_of(k, test_seed) & (buckets - 1)) == 0) {
+            crafted.push_back(k);
+        }
+    }
+    ASSERT_EQ(crafted.size(), 32u);
+
+    std::set<std::uint64_t> spread{};
+    for (const auto& k : crafted) {
+        spread.insert(hash_of(k, dgram::hash_seed{42, 7}) & (buckets - 1));
+    }
+    EXPECT_GT(spread.size(), 16u) << "32 keys over 64 buckets should land in far more than half as many buckets";
 }
 
 /* ============================================================================
@@ -210,6 +266,28 @@ TEST(FlowTable, EntriesViewSeesEveryLiveFlow) {
     }
     std::ranges::sort(values);
     EXPECT_EQ(values, (std::vector<int>{0, 1, 2, 3, 4, 6, 7, 8, 9}));
+}
+
+/* The table must bucket by SipHash under its own seed: entries() walks slot
+   order, so keys whose seeded buckets are all distinct come back sorted by them. */
+TEST(FlowTable, BucketsBySipHashUnderItsSeed) {
+    libmem::arena arena{table_type::footprint()};
+    auto t{table_type::carve(arena, test_seed)};
+    ASSERT_TRUE(t.has_value());
+
+    std::map<std::uint64_t, int> by_bucket{};
+    for (int port{1}; by_bucket.size() < 12; ++port) {
+        by_bucket.try_emplace(hash_of(dgram::peer_key{ep("192.0.2.1", static_cast<std::uint16_t>(port))}) & 63, port);
+    }
+    for (const auto& [bucket, port] : by_bucket | std::views::reverse) {
+        ASSERT_NE(t->insert(dgram::peer_key{ep("192.0.2.1", static_cast<std::uint16_t>(port))}, port), nullptr);
+    }
+
+    std::vector<int> walked{};
+    for (const auto& [key, value] : t->entries()) {
+        walked.push_back(value);
+    }
+    EXPECT_EQ(walked, (by_bucket | std::views::values | std::ranges::to<std::vector>()));
 }
 
 TEST(FlowTable, CarveFailsCleanlyOnASmallArena) {

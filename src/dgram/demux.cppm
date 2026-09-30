@@ -26,6 +26,7 @@ import libmem;
 import :address;
 import :error;
 import :feature;
+import :hash;
 import :metadata;
 import :offload;
 import :pacing;
@@ -93,16 +94,15 @@ public:
 
     [[nodiscard]] friend constexpr bool operator==(const byte_key& a, const byte_key& b) noexcept { return std::ranges::equal(a.bytes_, b.bytes_); }
 
-    [[nodiscard]] friend constexpr std::size_t hash_value(const byte_key& k) noexcept {
-        std::uint64_t h{0xCBF29CE484222325ULL};
-        for (const auto byte : k.bytes_) {
-            h ^= static_cast<std::uint8_t>(byte);
-            h *= 0x100000001B3ULL;
-        }
-        return h;
+    /** @brief Length first, so a key composed of this and more fields stays prefix-free. */
+    template <byte_hasher H> friend constexpr void hash_append(H& h, const byte_key& k) noexcept {
+        hash_append(h, static_cast<length_type>(k.bytes_.size()));
+        h(k.bytes());
     }
 
 private:
+    using length_type = std::conditional_t<(MaxBytes <= std::numeric_limits<std::uint8_t>::max()), std::uint8_t, std::size_t>;
+
     std::inplace_vector<std::byte, MaxBytes> bytes_{};
 };
 
@@ -111,7 +111,7 @@ export struct peer_key {
     endpoint remote{};
 
     [[nodiscard]] friend bool operator==(const peer_key& a, const peer_key& b) noexcept { return a.remote == b.remote; }
-    [[nodiscard]] friend std::size_t hash_value(const peer_key& k) noexcept { return hash_value(k.remote); }
+    template <byte_hasher H> friend void hash_append(H& h, const peer_key& k) noexcept { hash_append(h, k.remote); }
 };
 
 /**
@@ -127,18 +127,21 @@ export struct flow_key {
 
     [[nodiscard]] friend bool operator==(const flow_key& a, const flow_key& b) noexcept { return a.remote == b.remote && a.local == b.local; }
 
-    [[nodiscard]] friend std::size_t hash_value(const flow_key& k) noexcept {
-        const auto a{hash_value(k.remote)};
-        const auto b{hash_value(k.local)};
-        return a ^ (b + 0x9E3779B97F4A7C15ULL + (a << 6) + (a >> 2));
+    template <byte_hasher H> friend void hash_append(H& h, const flow_key& k) noexcept {
+        hash_append(h, k.remote);
+        hash_append(h, k.local);
     }
 };
 
-/** @brief A key usable by `flow_table`: equality-comparable and hashable. */
+/**
+ * @brief A key usable by `flow_table`: equality-comparable, and feeds its identity to a hasher.
+ *
+ * `hash_append` must feed exactly the fields `operator==` compares, in a
+ * prefix-free encoding: equal keys must hash equal, and two unequal keys that
+ * feed the same bytes collide under every seed.
+ */
 export template <typename K>
-concept demux_key = std::equality_comparable<K> && std::is_trivially_destructible_v<K> && requires(const K& k) {
-    { hash_value(k) } -> std::convertible_to<std::size_t>;
-};
+concept demux_key = std::equality_comparable<K> && std::is_trivially_destructible_v<K> && requires(siphash& h, const K& k) { hash_append(h, k); };
 
 static_assert(demux_key<peer_key>);
 static_assert(demux_key<flow_key>);
@@ -225,9 +228,12 @@ concept flow_lookup = requires(T& t, const T& ct, const Key& k, Value v) {
  *
  * Linear probing with backward-shift deletion, so there are no tombstones to
  * accumulate and a long-lived table does not degrade as flows come and go.
- * `Slots` must be a power of two; the table refuses to fill past seven eighths
- * of it, because a nearly full open-addressed table degenerates into a linear
- * scan and this one cannot grow.
+ * `Slots` must be a power of two; the table refuses to fill past three
+ * quarters of it, because a nearly full open-addressed table degenerates into a
+ * linear scan and this one cannot grow.
+ *
+ * Buckets come from SipHash under the table's own seed, so keys a peer picks to
+ * collide in one table spread out in another.
  *
  * Not thread-safe. One per thread, like everything else.
  */
@@ -240,14 +246,16 @@ public:
     using value_type = Value;
 
     /** @brief Flows the table will hold before refusing to grow. */
-    static constexpr std::size_t max_size{Slots / 8 * 7};
+    static constexpr std::size_t max_size{Slots / 4 * 3};
 
     static constexpr std::size_t footprint() noexcept {
         return Slots * sizeof(Key) + alignof(Key) - 1 + Slots * sizeof(Value) + alignof(Value) - 1 + Slots + alignof(std::byte) - 1;
     }
 
-    template <libmem::aligned_monotonic_resource R> [[nodiscard]] static result<flow_table> carve(R& resource) noexcept {
+    /** @brief Carve the table, hashing under `seed`. A seed a peer can learn or guess makes it floodable. */
+    template <libmem::aligned_monotonic_resource R> [[nodiscard]] static result<flow_table> carve(R& resource, const hash_seed seed) noexcept {
         flow_table t{};
+        t.seed_ = seed;
         auto* keys{static_cast<Key*>(resource.allocate(Slots * sizeof(Key), alignof(Key)))};
         auto* values{static_cast<Value*>(resource.allocate(Slots * sizeof(Value), alignof(Value)))};
         auto* used{static_cast<std::uint8_t*>(resource.allocate(Slots, alignof(std::uint8_t)))};
@@ -261,6 +269,11 @@ public:
         std::ranges::uninitialized_value_construct(t.values_);
         std::ranges::fill(t.used_, std::uint8_t{0});
         return t;
+    }
+
+    /** @brief Carve the table under a seed from `random_seed()`. */
+    template <libmem::aligned_monotonic_resource R> [[nodiscard]] static result<flow_table> carve(R& resource) noexcept {
+        return random_seed() | then([&resource](const hash_seed seed) { return carve(resource, seed); });
     }
 
     [[nodiscard]] Value* find(const Key& key) noexcept {
@@ -349,7 +362,11 @@ public:
 private:
     flow_table() noexcept = default;
 
-    [[nodiscard]] std::size_t bucket(const Key& key) const noexcept { return hash_value(key) & (Slots - 1); }
+    [[nodiscard]] std::size_t bucket(const Key& key) const noexcept {
+        siphash h{seed_};
+        hash_append(h, key);
+        return static_cast<std::size_t>(h.finish()) & (Slots - 1);
+    }
     [[nodiscard]] static constexpr std::size_t next(const std::size_t index) noexcept { return (index + 1) & (Slots - 1); }
 
     [[nodiscard]] std::optional<std::size_t> locate(const Key& key) const noexcept {
@@ -370,6 +387,7 @@ private:
     std::span<Value> values_{};
     std::span<std::uint8_t> used_{};
     std::size_t size_{};
+    hash_seed seed_{};
 };
 
 /* ============================================================================

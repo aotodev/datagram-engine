@@ -28,6 +28,9 @@ constexpr std::size_t slots{64};
 using key_type = dgram::byte_key<4>;
 using table_type = dgram::flow_table<key_type, std::uint32_t, slots>;
 
+/* Fixed, so a crash reproduces from its input alone. */
+constexpr dgram::hash_seed seed{0x243F6A8885A308D3ULL, 0x13198A2E03707344ULL};
+
 key_type key_of(const std::uint8_t id) noexcept {
     const std::array<std::byte, 1> raw{static_cast<std::byte>(id)};
     return key_type{raw};
@@ -47,7 +50,9 @@ void project(const std::span<const std::byte> payload) noexcept {
         if (payload.size() < 11) {
             std::abort(); // and must only exist when the bytes were there
         }
-        (void)hash_value(*key);
+        dgram::siphash h{seed};
+        hash_append(h, *key);
+        (void)h.finish();
     } else if (payload.size() >= 11) {
         std::abort(); // a long enough payload must always yield a key
     }
@@ -56,7 +61,7 @@ void project(const std::span<const std::byte> payload) noexcept {
 /** Drive the table against a reference and check they agree at every step. */
 void exercise_table(const std::span<const std::byte> ops) noexcept {
     libmem::arena arena{table_type::footprint()};
-    auto table{table_type::carve(arena)};
+    auto table{table_type::carve(arena, seed)};
     if (!table) {
         return;
     }

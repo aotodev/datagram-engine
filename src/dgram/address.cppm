@@ -15,6 +15,7 @@ export module dgram:address;
 
 import std;
 import :error;
+import :hash;
 
 namespace dgram {
 
@@ -147,26 +148,17 @@ public:
         return std::ranges::equal(a.address_bytes(), b.address_bytes());
     }
 
-    /** @brief Hash over exactly the fields `operator==` compares. */
-    [[nodiscard]] friend std::size_t hash_value(const endpoint& e) noexcept {
-        // FNV-1a: no allocation, no table, and adequate for a demux key.
-        std::uint64_t h{0xCBF29CE484222325ULL};
-        const auto mix = [&h](const std::uint8_t byte) noexcept {
-            h ^= byte;
-            h *= 0x100000001B3ULL;
-        };
-        mix(static_cast<std::uint8_t>(e.storage_.ss_family));
-        const auto port{e.port()};
-        mix(static_cast<std::uint8_t>(port));
-        mix(static_cast<std::uint8_t>(port >> 8));
-        for (const auto byte : e.address_bytes()) {
-            mix(static_cast<std::uint8_t>(byte));
-        }
-        const auto scope{e.scope_id()};
-        for (int shift{}; shift < 32; shift += 8) {
-            mix(static_cast<std::uint8_t>(scope >> shift));
-        }
-        return h;
+    /**
+     * @brief Feed exactly the fields `operator==` compares.
+     *
+     * The family fixes the address width, so the encoding is prefix-free and a
+     * key built from two endpoints cannot collide by shifting bytes between them.
+     */
+    template <byte_hasher H> friend void hash_append(H& h, const endpoint& e) noexcept {
+        hash_append(h, e.storage_.ss_family);
+        hash_append(h, e.port());
+        h(e.address_bytes());
+        hash_append(h, e.scope_id());
     }
 
 private:
@@ -177,9 +169,13 @@ static_assert(std::is_trivially_destructible_v<endpoint>);
 
 } // namespace dgram
 
-/** @brief So an `endpoint` can key a standard container as well as ours. */
+/** @brief So an `endpoint` can key a standard container as well as ours. Keyed per process. */
 template <> struct std::hash<dgram::endpoint> {
-    [[nodiscard]] std::size_t operator()(const dgram::endpoint& e) const noexcept { return hash_value(e); }
+    [[nodiscard]] std::size_t operator()(const dgram::endpoint& e) const noexcept {
+        dgram::siphash h{dgram::detail::process_seed()};
+        hash_append(h, e);
+        return static_cast<std::size_t>(h.finish());
+    }
 };
 
 namespace dgram {} // namespace dgram

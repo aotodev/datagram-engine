@@ -68,7 +68,7 @@ compiled and run as a test, so none of them can rot.
 | `pktinfo` / `ecn` | Which local address a datagram arrived on, and its ECN marking. Both families. |
 | `gro` / `segment` | Hardware segmentation offload: many datagrams per slot in, one large buffer out. |
 | `txtime` / `pacer` | Per-datagram departure times via `SO_TXTIME`, and drift-free rate arithmetic. |
-| `flow_table` / `route` | Open-addressing demultiplexing to protocol state, keyed by a caller-supplied projection. |
+| `flow_table` / `route` | Open-addressing demultiplexing to protocol state, keyed by a caller-supplied projection and hashed under a per-table SipHash seed, so peers cannot flood it. |
 | `timer_wheel` | Hierarchical timing wheel for protocol timeouts: constant-time schedule, cancel and expiry. |
 | `result` | `std::expected` over `errno`, with left-to-right pipe combinators. |
 

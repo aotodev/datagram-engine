@@ -120,4 +120,37 @@ TEST(DocExamples, TruncationFilterCompiles) {
     SUCCEED();
 }
 
+/* ============================================================================
+ * docs/demux.md: a custom key, and both ways to carve a table
+ * ============================================================================ */
+
+struct session_key {
+    dgram::endpoint peer{};
+    std::uint32_t epoch{};
+
+    friend bool operator==(const session_key&, const session_key&) = default;
+
+    template <dgram::byte_hasher H> friend void hash_append(H& h, const session_key& k) noexcept {
+        hash_append(h, k.peer);
+        hash_append(h, k.epoch);
+    }
+};
+
+static_assert(dgram::demux_key<session_key>);
+
+TEST(DocExamples, CustomKeyInATableCarvedBothWays) {
+    using table = dgram::flow_table<session_key, int, 64>;
+    libmem::arena arena{2 * table::footprint()};
+    auto flows{table::carve(arena)};
+    auto pinned{table::carve(arena, dgram::hash_seed{1, 2})};
+    ASSERT_TRUE(flows.has_value() && pinned.has_value());
+
+    const session_key k{*dgram::endpoint::parse(dgram::family::inet4, "192.0.2.1", 443), 7};
+    ASSERT_NE(flows->insert(k, 1), nullptr);
+    ASSERT_NE(pinned->insert(k, 2), nullptr);
+    EXPECT_EQ(*flows->find(k), 1);
+    EXPECT_EQ(*pinned->find(k), 2);
+    EXPECT_EQ(flows->find(session_key{k.peer, 8}), nullptr) << "epoch is part of the identity";
+}
+
 } // namespace

@@ -88,6 +88,7 @@ target_sources(dgram
       FILES
       src/dgram/error.cppm
       src/dgram/cmsg.cppm
+      src/dgram/hash.cppm
       src/dgram/address.cppm
       src/dgram/socket.cppm
       src/dgram/feature.cppm
