@@ -4,7 +4,7 @@ A Linux UDP datagram engine in C++26: batched send and receive, all memory
 carved once at startup, and a protocol boundary that hands out nothing but
 `std::span` and timing.
 
-Built on `recvmmsg` / `sendmmsg`, ancillary data (`IP_PKTINFO`, ECN), hardware
+Built on `recvmmsg` / `sendmmsg`, ancillary data (`IP_PKTINFO`, DSCP and ECN), hardware
 segmentation offload (`UDP_GRO` / `UDP_SEGMENT`) and transmit pacing
 (`SO_TXTIME`). It is not a general network library and has no TCP: the whole
 design turns on a batch being reclaimable in one step, which a byte stream is
@@ -65,7 +65,7 @@ compiled and run as a test, so none of them can rot.
 | `receive_batch` | `recvmmsg` argument block carved from a resource, plus a lazy view over what arrived. |
 | `transmit_batch` | `sendmmsg` argument block. Stages by reference, so echoing costs no copy. |
 | `features` | Compile-time set of ancillary-data features; the control buffer is sized as the sum over it. |
-| `pktinfo` / `ecn` | Which local address a datagram arrived on, and its ECN marking. Both families. |
+| `pktinfo` / `ecn` / `traffic_class` | Which local address a datagram arrived on, and its ECN and DSCP marking. Both families. |
 | `gro` / `segment` | Hardware segmentation offload: many datagrams per slot in, one large buffer out. |
 | `txtime` / `pacer` | Per-datagram departure times via `SO_TXTIME`, and drift-free rate arithmetic. |
 | `flow_table` / `route` | Open-addressing demultiplexing to protocol state, keyed by a caller-supplied projection and hashed under a per-table SipHash seed, so peers cannot flood it. |
@@ -104,10 +104,11 @@ for (const auto& d : batch->datagrams() | std::views::filter(dgram::is_intact)) 
 control buffer cannot fall out of step with what the parser expects.
 
 ```cpp
-using metadata_set = dgram::features<dgram::pktinfo, dgram::ecn>;
+using rx_set = dgram::features<dgram::pktinfo, dgram::ecn>;
+using tx_set = dgram::features<dgram::pktinfo, dgram::traffic_class>;
 
 const auto meta{d.meta()};
-if (const auto marking{meta.get<dgram::ecn>()}) { reply.set<dgram::ecn>(*marking); }
+if (const auto marking{meta.get<dgram::ecn>()}) { reply.set<dgram::traffic_class>({.ecn = *marking}); }
 ```
 
 ## Building
@@ -162,7 +163,7 @@ const auto counts{dgram::route(batch, dgram::by_payload_id<1, 8>{}, flows, now)}
 ## Status
 
 All five phases are done and tested: the memory model, the batching syscalls,
-ancillary data (destination address and ECN, both families), segmentation
+ancillary data (destination address, DSCP and ECN, both families), segmentation
 offload (`UDP_GRO` / `UDP_SEGMENT`), transmit pacing (`SO_TXTIME`),
 demultiplexing, and protocol timers.
 

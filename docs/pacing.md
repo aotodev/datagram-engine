@@ -54,7 +54,7 @@ option later.
 unpaced entries:
 
 ```cpp
-using tx_features = dgram::features<dgram::txtime, dgram::ecn>;
+using tx_features = dgram::features<dgram::txtime, dgram::traffic_class>;
 
 dgram::control<tx_features> ancillary{};
 ancillary.set<dgram::txtime>(when);

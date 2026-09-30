@@ -21,9 +21,10 @@ constexpr std::size_t batch_capacity{16};
 constexpr std::size_t slot_bytes{1 << 16};
 
 // The two directions carry different features: UDP_GRO is only ever received
-// and UDP_SEGMENT only ever sent.
+// and UDP_SEGMENT only ever sent. ECN is read with `ecn` and sent with
+// `traffic_class`, which carries the DSCP alongside it.
 using rx_features = dgram::features<dgram::pktinfo, dgram::ecn, dgram::gro>;
-using tx_features = dgram::features<dgram::ecn>;
+using tx_features = dgram::features<dgram::traffic_class>;
 
 using rx_batch = dgram::receive_batch<batch_capacity, slot_bytes, rx_features>;
 
@@ -82,7 +83,7 @@ int main(const int argc, const char* const* argv) {
             // Reflect the sender's ECN codepoint rather than sending unmarked.
             dgram::control<tx_features> reply{};
             if (const auto marking{meta.get<dgram::ecn>()}) {
-                reply.set<dgram::ecn>(*marking);
+                reply.set<dgram::traffic_class>({.dscp = dgram::dscp::df, .ecn = *marking});
             }
 
             if (!reported) {

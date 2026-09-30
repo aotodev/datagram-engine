@@ -20,8 +20,9 @@ constexpr std::size_t capacity{8};
 constexpr std::size_t slot{512};
 
 using meta_set = dgram::features<dgram::pktinfo, dgram::ecn>;
+using tx_set = dgram::features<dgram::pktinfo, dgram::traffic_class>;
 using rx_batch = dgram::receive_batch<capacity, slot, meta_set>;
-using tx_batch = dgram::transmit_batch<capacity, slot, meta_set>;
+using tx_batch = dgram::transmit_batch<capacity, slot, tx_set>;
 
 std::span<const std::byte> bytes_of(std::string_view s) noexcept {
     return {reinterpret_cast<const std::byte*>(s.data()), s.size()};
@@ -99,8 +100,8 @@ TEST_P(EcnRoundTrip, MarkedCodepointSurvives) {
     ASSERT_TRUE(rx.has_value() && tx.has_value());
 
     for (const auto marked : {dgram::ecn_codepoint::ect0, dgram::ecn_codepoint::ect1, dgram::ecn_codepoint::ce}) {
-        dgram::control<meta_set> ancillary{};
-        ancillary.set<dgram::ecn>(marked);
+        dgram::control<tx_set> ancillary{};
+        ancillary.set<dgram::traffic_class>({.ecn = marked});
         ASSERT_TRUE(tx->stage_copy(bytes_of("marked"), net.target, ancillary));
         ASSERT_TRUE(tx->flush(net.sender).has_value());
 
@@ -133,6 +134,88 @@ TEST(Metadata, UnmarkedDatagramReadsAsNotEct) {
 }
 
 /* ============================================================================
+ * Traffic class: DSCP travels with ECN
+ * ============================================================================ */
+
+using class_set = dgram::features<dgram::ecn, dgram::traffic_class>;
+using class_rx = dgram::receive_batch<capacity, slot, class_set>;
+
+/** A receiver reporting the traffic class, and a plain sender aimed at it. */
+struct class_fixture {
+    libmem::arena arena{class_rx::footprint() + tx_batch::footprint()};
+    dgram::socket receiver;
+    dgram::socket sender;
+    dgram::endpoint target{};
+
+    explicit class_fixture(const dgram::family f)
+        : receiver{std::move(*dgram::socket::open<dgram::receive_metadata<dgram::traffic_class>>(f))}, sender{std::move(*dgram::socket::open<>(f))} {
+        EXPECT_TRUE(receiver.bind(dgram::endpoint::any(f, 0)).has_value());
+        target = *dgram::endpoint::parse(f, f == dgram::family::inet4 ? "127.0.0.1" : "::1", receiver.local_address()->port());
+    }
+
+    /** The DSCP a socket applies to datagrams that carry no traffic class of their own. */
+    void set_socket_dscp(const dgram::family f, const dgram::dscp d) const {
+        const int byte{dgram::marking{d, dgram::ecn_codepoint::not_ect}.byte()};
+        const int level{f == dgram::family::inet4 ? IPPROTO_IP : IPPROTO_IPV6};
+        const int name{f == dgram::family::inet4 ? IP_TOS : IPV6_TCLASS};
+        ASSERT_EQ(::setsockopt(sender.native(), level, name, &byte, sizeof(byte)), 0);
+    }
+};
+
+class TrafficClass : public testing::TestWithParam<dgram::family> {};
+
+/* The bug this guards: marking ECN used to write the ECN bits as the whole byte,
+   so every ECN-marked datagram went out as best effort. */
+TEST_P(TrafficClass, DscpAndEcnArriveTogether) {
+    class_fixture net{GetParam()};
+    auto rx{class_rx::carve(net.arena)};
+    auto tx{tx_batch::carve(net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    for (const auto sent : {dgram::marking{dgram::dscp::ef, dgram::ecn_codepoint::ect0}, dgram::marking{dgram::dscp::af41, dgram::ecn_codepoint::ce},
+             dgram::marking{dgram::dscp::cs1, dgram::ecn_codepoint::not_ect}}) {
+        dgram::control<tx_set> ancillary{};
+        ancillary.set<dgram::traffic_class>(sent);
+        ASSERT_TRUE(tx->stage_copy(bytes_of("marked"), net.target, ancillary));
+        ASSERT_TRUE(tx->flush(net.sender).has_value());
+
+        ASSERT_EQ(*rx->receive(net.receiver), 1u);
+        const auto meta{(*rx->datagrams().begin()).meta()};
+        ASSERT_TRUE(meta.get<dgram::traffic_class>().has_value());
+        EXPECT_EQ(meta.get<dgram::traffic_class>()->byte(), sent.byte());
+        ASSERT_TRUE(meta.get<dgram::ecn>().has_value()) << "ecn reads the same message";
+        EXPECT_EQ(*meta.get<dgram::ecn>(), sent.ecn);
+    }
+}
+
+/* The per-datagram byte owns the whole traffic class: a socket-level DSCP applies
+   only to datagrams that carry none. */
+TEST_P(TrafficClass, PerDatagramMarkingReplacesTheSocketDscp) {
+    class_fixture net{GetParam()};
+    net.set_socket_dscp(GetParam(), dgram::dscp::ef);
+    auto rx{class_rx::carve(net.arena)};
+    auto tx{tx_batch::carve(net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    ASSERT_TRUE(tx->stage_copy(bytes_of("socket default"), net.target));
+    ASSERT_TRUE(tx->flush(net.sender).has_value());
+    ASSERT_EQ(*rx->receive(net.receiver), 1u);
+    EXPECT_EQ((*rx->datagrams().begin()).meta().get<dgram::traffic_class>()->dscp, dgram::dscp::ef);
+
+    dgram::control<tx_set> ancillary{};
+    ancillary.set<dgram::traffic_class>({.ecn = dgram::ecn_codepoint::ect0});
+    ASSERT_TRUE(tx->stage_copy(bytes_of("own marking"), net.target, ancillary));
+    ASSERT_TRUE(tx->flush(net.sender).has_value());
+    ASSERT_EQ(*rx->receive(net.receiver), 1u);
+    const auto got{*(*rx->datagrams().begin()).meta().get<dgram::traffic_class>()};
+    EXPECT_EQ(got.dscp, dgram::dscp::df) << "the datagram said df, and that wins over the socket";
+    EXPECT_EQ(got.ecn, dgram::ecn_codepoint::ect0);
+}
+
+INSTANTIATE_TEST_SUITE_P(BothFamilies, TrafficClass, testing::Values(dgram::family::inet4, dgram::family::inet6),
+    [](const auto& p) { return p.param == dgram::family::inet4 ? "IPv4" : "IPv6"; });
+
+/* ============================================================================
  * Dual-stack sockets: IPv4 peers on a v6 socket
  * ============================================================================ */
 
@@ -162,8 +245,8 @@ TEST(DualStack, ReportsEcnForIPv4Arrivals) {
     ASSERT_TRUE(rx.has_value() && tx.has_value());
 
     for (const auto marked : marked_codepoints) {
-        dgram::control<meta_set> ancillary{};
-        ancillary.set<dgram::ecn>(marked);
+        dgram::control<tx_set> ancillary{};
+        ancillary.set<dgram::traffic_class>({.ecn = marked});
         ASSERT_TRUE(tx->stage_copy(bytes_of("from v4"), target, ancillary));
         ASSERT_TRUE(tx->flush(net.sender).has_value());
 
@@ -190,8 +273,8 @@ TEST(DualStack, MarksEcnOnDatagramsToV4MappedPeers) {
     ASSERT_TRUE(rx.has_value() && tx.has_value());
 
     for (const auto marked : marked_codepoints) {
-        dgram::control<meta_set> ancillary{};
-        ancillary.set<dgram::ecn>(marked);
+        dgram::control<tx_set> ancillary{};
+        ancillary.set<dgram::traffic_class>({.ecn = marked});
         ASSERT_TRUE(tx->stage_copy(bytes_of("to v4-mapped"), target, ancillary));
         const auto sent{tx->flush(sender)};
         ASSERT_TRUE(sent.has_value()) << dgram::describe(sent.error());
@@ -220,8 +303,8 @@ TEST(DualStack, RepliesToAnIPv4PeerFromTheArrivalAddress) {
     ASSERT_TRUE(client_rx.has_value() && client_tx.has_value() && server_rx.has_value() && server_tx.has_value());
 
     // The client's receive socket sends too, so the reply comes back to it.
-    dgram::control<meta_set> request{};
-    request.set<dgram::ecn>(dgram::ecn_codepoint::ect1);
+    dgram::control<tx_set> request{};
+    request.set<dgram::traffic_class>({.ecn = dgram::ecn_codepoint::ect1});
     ASSERT_TRUE(client_tx->stage_copy(bytes_of("ping"), server_target, request));
     ASSERT_TRUE(client_tx->flush(client.receiver).has_value());
 
@@ -230,9 +313,9 @@ TEST(DualStack, RepliesToAnIPv4PeerFromTheArrivalAddress) {
     const auto meta{arrival.meta()};
     ASSERT_TRUE(meta.get<dgram::pktinfo>().has_value() && meta.get<dgram::ecn>().has_value());
 
-    dgram::control<meta_set> reply{};
+    dgram::control<tx_set> reply{};
     reply.set<dgram::pktinfo>(*meta.get<dgram::pktinfo>());
-    reply.set<dgram::ecn>(*meta.get<dgram::ecn>());
+    reply.set<dgram::traffic_class>({.ecn = *meta.get<dgram::ecn>()});
     ASSERT_TRUE(server_tx->stage_copy(bytes_of("pong"), arrival.from(), reply));
     const auto sent{server_tx->flush(server)};
     ASSERT_TRUE(sent.has_value()) << dgram::describe(sent.error());
@@ -321,8 +404,8 @@ TEST(Metadata, StaleControlLengthDoesNotLeakBetweenDatagrams) {
     auto tx{tx_batch::carve(net.arena)};
     ASSERT_TRUE(rx.has_value() && tx.has_value());
 
-    dgram::control<meta_set> marked{};
-    marked.set<dgram::ecn>(dgram::ecn_codepoint::ce);
+    dgram::control<tx_set> marked{};
+    marked.set<dgram::traffic_class>({.ecn = dgram::ecn_codepoint::ce});
 
     ASSERT_TRUE(tx->stage_copy(bytes_of("marked"), net.target, marked));
     ASSERT_TRUE(tx->flush(net.sender).has_value());

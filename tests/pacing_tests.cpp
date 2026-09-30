@@ -27,7 +27,7 @@ constexpr std::size_t capacity{8};
 constexpr std::size_t slot{2048};
 constexpr dgram::pacer::rate_type gigabit{125'000'000}; // bytes/s
 
-using tx_set = dgram::features<dgram::txtime, dgram::ecn>;
+using tx_set = dgram::features<dgram::txtime, dgram::traffic_class>;
 using tx_batch = dgram::transmit_batch<capacity, slot, tx_set>;
 using rx_batch = dgram::receive_batch<capacity, slot>;
 
@@ -216,7 +216,7 @@ TEST(TransmitTime, PacingAndEcnTravelTogether) {
 
     dgram::control<tx_set> ancillary{};
     ancillary.set<dgram::txtime>(1'000'000ns);
-    ancillary.set<dgram::ecn>(dgram::ecn_codepoint::ect0);
+    ancillary.set<dgram::traffic_class>({.ecn = dgram::ecn_codepoint::ect0});
 
     const auto target{*dgram::endpoint::parse(dgram::family::inet4, "127.0.0.1", 9)};
     EXPECT_TRUE(tx->stage(bytes_of("x"), target, ancillary));

@@ -17,9 +17,21 @@ namespace {
 static_assert(dgram::cmsg_feature<dgram::pktinfo>);
 static_assert(dgram::cmsg_feature<dgram::ecn>);
 static_assert(dgram::sendable_feature<dgram::pktinfo>);
-static_assert(dgram::sendable_feature<dgram::ecn>);
 static_assert(dgram::receivable_feature<dgram::pktinfo>);
 static_assert(dgram::receivable_feature<dgram::ecn>);
+static_assert(dgram::sendable_feature<dgram::traffic_class> && dgram::receivable_feature<dgram::traffic_class>);
+
+/* The kernel takes a per-datagram traffic class as the whole byte, so sending
+   the ECN bits alone would zero the DSCP. Only traffic_class sends. */
+static_assert(!dgram::sendable_feature<dgram::ecn>);
+
+/* DSCP in the high six bits, ECN in the low two. */
+static_assert(dgram::marking{dgram::dscp::ef, dgram::ecn_codepoint::ect0}.byte() == 0xBA);
+static_assert(dgram::marking{dgram::dscp::cs7, dgram::ecn_codepoint::ce}.byte() == 0xE3);
+static_assert(dgram::marking{}.byte() == 0);
+static_assert(dgram::marking::from_byte(0xBA) == dgram::marking{dgram::dscp::ef, dgram::ecn_codepoint::ect0});
+static_assert(dgram::marking{static_cast<dgram::dscp>(0xFF), dgram::ecn_codepoint::not_ect}.byte() == 0xFC, "a DSCP above 63 cannot spill into the ECN bits");
+static_assert(dgram::traffic_class::space == dgram::ecn::space);
 
 /* A type carrying only a size is not a feature: it can contribute to the buffer
    but never be parsed out of it, which is exactly the mismatch to prevent. */
@@ -68,8 +80,8 @@ static_assert(dgram::sendable_feature<dgram::txtime> && !dgram::parseable_featur
 
 /* Four distinct cmsg payload widths are now in play, so every control-buffer
    term is derived from the feature rather than written down. */
-using paced = dgram::features<dgram::txtime, dgram::ecn, dgram::segment>;
-static_assert(paced::control_space == dgram::txtime::space + dgram::ecn::space + dgram::segment::space);
+using paced = dgram::features<dgram::txtime, dgram::traffic_class, dgram::segment>;
+static_assert(paced::control_space == dgram::txtime::space + dgram::traffic_class::space + dgram::segment::space);
 static_assert(dgram::txtime::space == dgram::detail::space_for(sizeof(std::uint64_t)));
 static_assert(dgram::segment::space == dgram::detail::space_for(sizeof(std::uint16_t)));
 static_assert(dgram::gro::space == dgram::detail::space_for(sizeof(int)));
@@ -160,7 +172,8 @@ static_assert(std::is_same_v<decltype(std::declval<const dgram::metadata<both>>(
 template <typename Features, typename F>
 concept settable = requires(dgram::control<Features>& c, typename F::value_type v) { c.template set<F>(v); };
 
-static_assert(settable<both, dgram::ecn>);
+static_assert(settable<dgram::features<dgram::traffic_class>, dgram::traffic_class>);
+static_assert(!settable<both, dgram::ecn>, "ecn is receive-only");
 static_assert(!settable<only_ecn, dgram::pktinfo>);
 
 /* The control buffer's size is carried by the type, not checked at runtime.

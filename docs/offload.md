@@ -12,7 +12,7 @@ each take their own:
 
 ```cpp
 using rx_features = dgram::features<dgram::pktinfo, dgram::ecn, dgram::gro>;
-using tx_features = dgram::features<dgram::ecn, dgram::segment>;
+using tx_features = dgram::features<dgram::traffic_class, dgram::segment>;
 
 using rx = dgram::receive_batch<16, 1 << 16, rx_features>;
 using tx = dgram::transmit_batch<16, 0, tx_features>;
