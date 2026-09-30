@@ -28,7 +28,7 @@ import dgram;
 
 namespace {
 
-using both = dgram::features<dgram::pktinfo, dgram::ecn>;
+using combined = dgram::features<dgram::pktinfo, dgram::ecn, dgram::traffic_class>;
 using only_pktinfo = dgram::features<dgram::pktinfo>;
 using only_ecn = dgram::features<dgram::ecn>;
 
@@ -74,6 +74,11 @@ template <typename Features> void parse_as(const std::span<const std::byte> byte
             (void)std::to_underlying(*marking);
         }
     }
+    if constexpr (Features::template contains<dgram::traffic_class>) {
+        if (const auto& marking{meta.template get<dgram::traffic_class>()}) {
+            (void)marking->byte();
+        }
+    }
 
     ::operator delete(control, len, std::align_val_t{alignof(::cmsghdr)});
 }
@@ -89,7 +94,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 
     switch (selector % 3) {
     case 0:
-        parse_as<both>(body);
+        parse_as<combined>(body);
         break;
     case 1:
         parse_as<only_pktinfo>(body);

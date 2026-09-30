@@ -24,7 +24,7 @@ constexpr std::size_t capacity{8};
 constexpr std::size_t gro_slot{1 << 16};
 
 using rx_set = dgram::features<dgram::gro, dgram::ecn>;
-using tx_set = dgram::features<dgram::segment, dgram::ecn>;
+using tx_set = dgram::features<dgram::segment, dgram::traffic_class>;
 using rx_batch = dgram::receive_batch<capacity, gro_slot, rx_set>;
 using tx_batch = dgram::transmit_batch<capacity, gro_slot, tx_set>;
 
@@ -187,7 +187,7 @@ TEST(Offload, SegmentAndEcnTravelTogether) {
     std::vector<std::byte> payload(3 * mtu);
     dgram::control<tx_set> ancillary{};
     ancillary.set<dgram::segment>(mtu);
-    ancillary.set<dgram::ecn>(dgram::ecn_codepoint::ect0);
+    ancillary.set<dgram::traffic_class>({.ecn = dgram::ecn_codepoint::ect0});
 
     ASSERT_TRUE(tx->stage(payload, net.target, ancillary));
     ASSERT_TRUE(tx->flush(net.sender).has_value());

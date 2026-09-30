@@ -23,8 +23,9 @@ constexpr std::size_t worker_count{4};
 constexpr std::size_t datagrams_per_worker{64};
 
 using meta_set = dgram::features<dgram::pktinfo, dgram::ecn>;
+using tx_set = dgram::features<dgram::pktinfo, dgram::traffic_class>;
 using rx_batch = dgram::receive_batch<capacity, slot, meta_set>;
-using tx_batch = dgram::transmit_batch<capacity, slot, meta_set>;
+using tx_batch = dgram::transmit_batch<capacity, slot, tx_set>;
 
 std::span<const std::byte> bytes_of(std::string_view s) noexcept {
     return {reinterpret_cast<const std::byte*>(s.data()), s.size()};
@@ -64,8 +65,8 @@ TEST(Concurrency, WorkersShareNothing) {
             }
 
             for (std::size_t sent{}; sent < datagrams_per_worker; ++sent) {
-                dgram::control<meta_set> marked{};
-                marked.set<dgram::ecn>(dgram::ecn_codepoint::ect0);
+                dgram::control<tx_set> marked{};
+                marked.set<dgram::traffic_class>({.ecn = dgram::ecn_codepoint::ect0});
                 const auto text{std::format("w-{}-{}", w, sent)};
                 if (!tx->stage_copy(bytes_of(text), target, marked)) {
                     continue;

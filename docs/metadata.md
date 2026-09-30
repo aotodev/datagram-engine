@@ -1,8 +1,8 @@
 # Ancillary data
 
 Datagrams carry more than payload and peer address. The kernel reports which
-local address one arrived on, and what its ECN marking was, as *control
-messages* alongside the data. This layer turns those into typed values and
+local address one arrived on, and what its DSCP and ECN marking were, as
+*control messages* alongside the data. This layer turns those into typed values and
 attaches them on the way out.
 
 ## The feature set
@@ -12,11 +12,15 @@ determines three things that must agree: how large the control buffer is, what
 the parser looks for, and what can be attached on transmit.
 
 ```cpp
-using metadata_set = dgram::features<dgram::pktinfo, dgram::ecn>;
+using rx_set = dgram::features<dgram::pktinfo, dgram::ecn>;
+using tx_set = dgram::features<dgram::pktinfo, dgram::traffic_class>;
 
-using rx = dgram::receive_batch<64, 2048, metadata_set>;
-using tx = dgram::transmit_batch<64, 0, metadata_set>;
+using rx = dgram::receive_batch<64, 2048, rx_set>;
+using tx = dgram::transmit_batch<64, 0, tx_set>;
 ```
+
+Not every feature goes both ways, so a receive and a transmit batch usually take
+different sets. ECN is read with `ecn` and sent with `traffic_class`.
 
 | Member | Description |
 |--------|-------------|
@@ -68,8 +72,8 @@ short parse rather than a read past the end. The loss is reported separately, as
 ## Writing it
 
 ```cpp
-dgram::control<metadata_set> reply{};
-reply.set<dgram::ecn>(dgram::ecn_codepoint::ect0);
+dgram::control<tx_set> reply{};
+reply.set<dgram::traffic_class>({.dscp = dgram::dscp::ef, .ecn = dgram::ecn_codepoint::ect0});
 (void)tx.stage(payload, peer, reply);
 ```
 
@@ -103,9 +107,19 @@ Sized for the larger of the two families' payloads, because the receive path
 cannot know which will arrive: a dual-stack socket reports `IPV6_PKTINFO` even
 for v4-mapped traffic.
 
-## `ecn`
+## `ecn` and `traffic_class`
 
-`IP_TOS` / `IPV6_TCLASS`, reduced to the two ECN bits of RFC 3168.
+Both read `IP_TOS` / `IPV6_TCLASS`, the traffic-class byte: six bits of DSCP
+and two of ECN. `ecn` reduces it to the ECN bits and is **receive-only**.
+`traffic_class` carries the whole byte as a `marking {dscp, ecn}` and goes both
+ways.
+
+`ecn` cannot be sent because the kernel takes a per-datagram traffic class as
+the whole byte. Marking the ECN bits alone would zero the DSCP, so every
+ECN-capable datagram would leave as best effort. Sending goes through
+`traffic_class`, which makes the DSCP part of the value. That value also
+replaces any DSCP the socket was given with `setsockopt(IP_TOS)`: a socket-level
+DSCP only applies to datagrams that carry no `traffic_class`.
 
 | `ecn_codepoint` | Meaning |
 |-----------------|---------|
@@ -114,8 +128,12 @@ for v4-mapped traffic.
 | `ect0` | ECN-capable, codepoint 0. |
 | `ce` | Congestion experienced. |
 
-An unmarked datagram reads as `not_ect`, not as absent, provided reporting was
-enabled.
+`dscp` names the standard classes (`df`, `le`, `cs1` to `cs7`, `af11` to
+`af43`, `voice_admit`, `ef`), and any value up to 63 is valid through a cast.
+
+An unmarked datagram reads as `not_ect` (and `dscp::df`), not as absent,
+provided reporting was enabled. A receive set can hold both features; they read
+the same message.
 
 On a v6 socket, enabling it sets both `IPV6_RECVTCLASS` and `IP_RECVTOS`. IPv4
 peers of a dual-stack socket arrive through the kernel's IPv4 path, which reports
