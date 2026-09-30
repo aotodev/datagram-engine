@@ -81,6 +81,15 @@ public:
     [[nodiscard]] constexpr bool is_v6() const noexcept { return storage_.ss_family == AF_INET6; }
     [[nodiscard]] constexpr bool valid() const noexcept { return is_v4() || is_v6(); }
 
+    /** @brief `::ffff:a.b.c.d`: a v6 address the kernel sends and receives as IPv4. */
+    [[nodiscard]] bool is_v4_mapped() const noexcept {
+        constexpr std::array<std::byte, 12> prefix{{{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, std::byte{0xFF}, std::byte{0xFF}}};
+        return is_v6() && std::ranges::equal(address_bytes().first<12>(), prefix);
+    }
+
+    /** @brief The family a datagram to this endpoint travels as: v4 for a v4-mapped address. */
+    [[nodiscard]] family wire_family() const noexcept { return (is_v4() || is_v4_mapped()) ? family::inet4 : family::inet6; }
+
     [[nodiscard]] std::uint16_t port() const noexcept {
         return ::ntohs(is_v4() ? reinterpret_cast<const ::sockaddr_in&>(storage_).sin_port : reinterpret_cast<const ::sockaddr_in6&>(storage_).sin6_port);
     }

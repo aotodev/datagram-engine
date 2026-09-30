@@ -83,13 +83,16 @@ export struct pktinfo {
      *
      * Only the address and interface are set; leaving both zero lets the routing
      * table choose, which is the same thing as not attaching the header at all.
+     *
+     * A v4 build accepts a v4-mapped address, which is what a dual-stack socket
+     * reports for IPv4 arrivals, so a reply can reuse the `local_info` as is.
      */
     [[nodiscard]] static std::size_t build(::cmsghdr* dst, const value_type& value, const family fam) noexcept {
         if (fam == family::inet4) {
             ::in_pktinfo raw{};
             raw.ipi_ifindex = static_cast<int>(value.interface);
-            if (value.address.is_v4()) {
-                raw.ipi_spec_dst = reinterpret_cast<const ::sockaddr_in*>(value.address.raw())->sin_addr;
+            if (value.address.is_v4() || value.address.is_v4_mapped()) {
+                std::memcpy(&raw.ipi_spec_dst, value.address.address_bytes().last<sizeof(raw.ipi_spec_dst)>().data(), sizeof(raw.ipi_spec_dst));
             }
             return detail::write_message(dst, IPPROTO_IP, IP_PKTINFO, raw);
         }
@@ -166,15 +169,19 @@ export struct ecn {
         return detail::write_message(dst, IPPROTO_IPV6, IPV6_TCLASS, bits);
     }
 
-    /** @brief Ask the kernel to report the traffic class. */
+    /**
+     * @brief Ask the kernel to report the traffic class.
+     *
+     * A v6 socket also gets `IP_RECVTOS`: IPv4 traffic on a dual-stack socket
+     * takes the kernel's IPv4 path, which reports `IP_TOS` and never
+     * `IPV6_TCLASS`. The option is accepted on a v6-only socket too.
+     */
     [[nodiscard]] static result<> enable(const int fd, const family fam) noexcept {
-        const int on{1};
-        const int level{fam == family::inet4 ? IPPROTO_IP : IPPROTO_IPV6};
-        const int name{fam == family::inet4 ? IP_RECVTOS : IPV6_RECVTCLASS};
-        if (::setsockopt(fd, level, name, &on, static_cast<::socklen_t>(sizeof(on))) < 0) [[unlikely]] {
-            return fail<>();
+        const auto report_tos = [fd] { return detail::set_option(fd, IPPROTO_IP, IP_RECVTOS, 1); };
+        if (fam == family::inet4) {
+            return report_tos();
         }
-        return {};
+        return detail::set_option(fd, IPPROTO_IPV6, IPV6_RECVTCLASS, 1) | then(report_tos);
     }
 
 private:

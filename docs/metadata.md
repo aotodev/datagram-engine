@@ -77,9 +77,10 @@ Unset features contribute nothing. The control block is built per datagram and
 `msg_controllen` set to exactly what was written, zero included, so a marking on
 one datagram cannot leak onto the next one staged in the same slot.
 
-The family for the build step comes from the destination endpoint, so a
-dual-stack socket sending to both families emits the right level and type per
-datagram.
+The family for the build step is the destination's `wire_family()`, not the
+socket's. A dual-stack socket sends to a v4-mapped peer down the kernel's IPv4
+path, which ignores `IPV6_TCLASS` and every other v6-level message except
+`IPV6_PKTINFO`, so those datagrams get `IP_TOS` and `IP_PKTINFO` instead.
 
 ## `pktinfo`
 
@@ -94,7 +95,9 @@ The reason a wildcard-bound socket can answer from the address the peer actually
 addressed, which matters the moment a host has more than one.
 
 On transmit it selects the source address and interface. Leaving both zero lets
-the routing table choose, which is the same as attaching nothing.
+the routing table choose, which is the same as attaching nothing. A reply can
+hand back the `local_info` it received unchanged, including the v4-mapped one a
+dual-stack socket reports for an IPv4 peer.
 
 Sized for the larger of the two families' payloads, because the receive path
 cannot know which will arrive: a dual-stack socket reports `IPV6_PKTINFO` even
@@ -114,6 +117,10 @@ for v4-mapped traffic.
 An unmarked datagram reads as `not_ect`, not as absent, provided reporting was
 enabled.
 
+On a v6 socket, enabling it sets both `IPV6_RECVTCLASS` and `IP_RECVTOS`. IPv4
+peers of a dual-stack socket arrive through the kernel's IPv4 path, which reports
+`IP_TOS` and never `IPV6_TCLASS`.
+
 The two families use different widths, and the difference is not documented
 anywhere obvious: `IP_TOS` arrives as a **single byte** and `IPV6_TCLASS` as a
 **four-byte int**. `parse` branches on the length the kernel actually wrote
@@ -129,7 +136,7 @@ struct my_feature {
     static constexpr std::size_t space{dgram::detail::space_for(sizeof(payload))};
     static bool matches(int level, int type) noexcept;
     static std::optional<value_type> parse(const ::cmsghdr*) noexcept;
-    static std::size_t build(::cmsghdr* dst, const value_type&, dgram::family) noexcept;  // optional
+    static std::size_t build(::cmsghdr* dst, const value_type&, dgram::family wire) noexcept;  // optional
     static dgram::result<> enable(int fd, dgram::family) noexcept;                        // optional
 };
 ```
@@ -141,6 +148,9 @@ with `enable`. `gro` is receivable but not sendable and `segment` the reverse, s
 a receive and a transmit batch take their own sets.
 
 A feature appearing in both families sets `space` to the larger payload.
+
+`build` gets the family the datagram travels as, which is `inet4` for a
+v4-mapped destination on a v6 socket. Emit the IPv4-level message for it.
 
 `parse` returns nothing when the payload is narrower than what it would read.
 That check is the feature's job, because only it knows what widths the kernel

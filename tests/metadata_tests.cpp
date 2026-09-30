@@ -7,6 +7,7 @@
  */
 #include <gtest/gtest.h>
 
+#include <cerrno>
 #include <netinet/in.h>
 
 import std;
@@ -129,6 +130,124 @@ TEST(Metadata, UnmarkedDatagramReadsAsNotEct) {
     const auto& got{(*view.begin()).meta().get<dgram::ecn>()};
     ASSERT_TRUE(got.has_value());
     EXPECT_EQ(*got, dgram::ecn_codepoint::not_ect);
+}
+
+/* ============================================================================
+ * Dual-stack sockets: IPv4 peers on a v6 socket
+ * ============================================================================ */
+
+/* Explicit, because the default is the net.ipv6.bindv6only sysctl. */
+struct dual_stack {
+    [[nodiscard]] static dgram::result<> apply(const int fd, dgram::family) noexcept {
+        const int off{0};
+        if (::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off)) < 0) {
+            return std::unexpected{dgram::errc{errno}};
+        }
+        return {};
+    }
+};
+
+constexpr std::array marked_codepoints{dgram::ecn_codepoint::ect0, dgram::ecn_codepoint::ect1, dgram::ecn_codepoint::ce};
+
+/* IPv4 arrivals take the kernel's IPv4 path, which reports IP_TOS and never
+   IPV6_TCLASS, so the v6 socket has to ask for both. */
+TEST(DualStack, ReportsEcnForIPv4Arrivals) {
+    fixture net{dgram::family::inet4};
+    dgram::socket receiver{std::move(*dgram::socket::open<dual_stack, dgram::receive_metadata<dgram::pktinfo, dgram::ecn>>(dgram::family::inet6))};
+    ASSERT_TRUE(receiver.bind(dgram::endpoint::any(dgram::family::inet6, 0)).has_value());
+    const auto target{*dgram::endpoint::parse(dgram::family::inet4, "127.0.0.1", receiver.local_address()->port())};
+
+    auto rx{rx_batch::carve(net.arena)};
+    auto tx{tx_batch::carve(net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    for (const auto marked : marked_codepoints) {
+        dgram::control<meta_set> ancillary{};
+        ancillary.set<dgram::ecn>(marked);
+        ASSERT_TRUE(tx->stage_copy(bytes_of("from v4"), target, ancillary));
+        ASSERT_TRUE(tx->flush(net.sender).has_value());
+
+        ASSERT_EQ(*rx->receive(receiver), 1u);
+        const auto d{*rx->datagrams().begin()};
+        ASSERT_TRUE(d.intact()) << "IP_TOS and IPV6_PKTINFO both fit the control buffer";
+        EXPECT_TRUE(d.from().is_v4_mapped());
+        const auto meta{d.meta()};
+        ASSERT_TRUE(meta.get<dgram::ecn>().has_value()) << "codepoint " << static_cast<int>(std::to_underlying(marked));
+        EXPECT_EQ(*meta.get<dgram::ecn>(), marked);
+        ASSERT_TRUE(meta.get<dgram::pktinfo>().has_value());
+        EXPECT_TRUE(meta.get<dgram::pktinfo>()->address.is_v4_mapped());
+    }
+}
+
+/* Sending to a v4-mapped peer goes down the IPv4 path, which ignores IPV6_TCLASS. */
+TEST(DualStack, MarksEcnOnDatagramsToV4MappedPeers) {
+    fixture net{dgram::family::inet4};
+    dgram::socket sender{std::move(*dgram::socket::open<dual_stack>(dgram::family::inet6))};
+    const auto target{*dgram::endpoint::parse(dgram::family::inet6, "::ffff:127.0.0.1", net.target.port())};
+
+    auto rx{rx_batch::carve(net.arena)};
+    auto tx{tx_batch::carve(net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    for (const auto marked : marked_codepoints) {
+        dgram::control<meta_set> ancillary{};
+        ancillary.set<dgram::ecn>(marked);
+        ASSERT_TRUE(tx->stage_copy(bytes_of("to v4-mapped"), target, ancillary));
+        const auto sent{tx->flush(sender)};
+        ASSERT_TRUE(sent.has_value()) << dgram::describe(sent.error());
+
+        ASSERT_EQ(*rx->receive(net.receiver), 1u);
+        const auto& got{(*rx->datagrams().begin()).meta().get<dgram::ecn>()};
+        ASSERT_TRUE(got.has_value());
+        EXPECT_EQ(*got, marked) << "codepoint " << static_cast<int>(std::to_underlying(marked));
+    }
+}
+
+/* The server pattern: answer an IPv4 client from the local address it reached,
+   reflecting its marking, by handing the arrival's local_info straight back. */
+TEST(DualStack, RepliesToAnIPv4PeerFromTheArrivalAddress) {
+    fixture client{dgram::family::inet4};
+    dgram::socket server{std::move(*dgram::socket::open<dual_stack, dgram::receive_metadata<dgram::pktinfo, dgram::ecn>>(dgram::family::inet6))};
+    ASSERT_TRUE(server.bind(dgram::endpoint::any(dgram::family::inet6, 0)).has_value());
+    const auto server_port{server.local_address()->port()};
+    const auto server_target{*dgram::endpoint::parse(dgram::family::inet4, "127.0.0.1", server_port)};
+
+    libmem::arena server_arena{rx_batch::footprint() + tx_batch::footprint()};
+    auto client_rx{rx_batch::carve(client.arena)};
+    auto client_tx{tx_batch::carve(client.arena)};
+    auto server_rx{rx_batch::carve(server_arena)};
+    auto server_tx{tx_batch::carve(server_arena)};
+    ASSERT_TRUE(client_rx.has_value() && client_tx.has_value() && server_rx.has_value() && server_tx.has_value());
+
+    // The client's receive socket sends too, so the reply comes back to it.
+    dgram::control<meta_set> request{};
+    request.set<dgram::ecn>(dgram::ecn_codepoint::ect1);
+    ASSERT_TRUE(client_tx->stage_copy(bytes_of("ping"), server_target, request));
+    ASSERT_TRUE(client_tx->flush(client.receiver).has_value());
+
+    ASSERT_EQ(*server_rx->receive(server), 1u);
+    const auto arrival{*server_rx->datagrams().begin()};
+    const auto meta{arrival.meta()};
+    ASSERT_TRUE(meta.get<dgram::pktinfo>().has_value() && meta.get<dgram::ecn>().has_value());
+
+    dgram::control<meta_set> reply{};
+    reply.set<dgram::pktinfo>(*meta.get<dgram::pktinfo>());
+    reply.set<dgram::ecn>(*meta.get<dgram::ecn>());
+    ASSERT_TRUE(server_tx->stage_copy(bytes_of("pong"), arrival.from(), reply));
+    const auto sent{server_tx->flush(server)};
+    ASSERT_TRUE(sent.has_value()) << dgram::describe(sent.error());
+
+    ASSERT_EQ(*client_rx->receive(client.receiver), 1u);
+    const auto back{*client_rx->datagrams().begin()};
+    EXPECT_EQ(back.from(), server_target) << "answered from the address the client addressed";
+    const auto& ecn{back.meta().get<dgram::ecn>()};
+    ASSERT_TRUE(ecn.has_value());
+    EXPECT_EQ(*ecn, dgram::ecn_codepoint::ect1) << "the reflected marking survived the v4-mapped send";
+}
+
+TEST(DualStack, V6OnlySocketStillEnablesEcn) {
+    const auto sock{dgram::socket::open<dgram::v6_only, dgram::receive_metadata<dgram::pktinfo, dgram::ecn>>(dgram::family::inet6)};
+    ASSERT_TRUE(sock.has_value()) << dgram::describe(sock.error());
 }
 
 /* ============================================================================

@@ -386,8 +386,9 @@ public:
      * earlier flush would have the kernel read whatever that datagram left
      * behind, which is the transmit mirror of the receive-side rearm.
      *
-     * The family for the build step comes from `to`, so a dual-stack socket
-     * sending to both families emits the right level and type per datagram.
+     * The build step gets `to.wire_family()`, not the socket's family: the
+     * kernel sends to a v4-mapped peer down its IPv4 path, which ignores
+     * `IPV6_TCLASS` and every other v6-level message except `IPV6_PKTINFO`.
      *
      * @return `false` if the batch is already full.
      */
@@ -458,7 +459,7 @@ private:
             return 0;
         } else {
             const std::span<std::byte, Features::control_space> block{control_.data() + (i * Features::control_space), Features::control_space};
-            return ancillary.build_into(block, to.is_v4() ? family::inet4 : family::inet6);
+            return ancillary.build_into(block, to.wire_family());
         }
     }
 
