@@ -63,6 +63,24 @@ TEST(Endpoint, RoundTripsTextAndPort) {
     EXPECT_NE(*ep, *v6);
 }
 
+TEST(Endpoint, V4MappedTravelsAsIPv4) {
+    const auto mapped{*dgram::endpoint::parse(dgram::family::inet6, "::ffff:192.0.2.7", 443)};
+    EXPECT_TRUE(mapped.is_v4_mapped());
+    EXPECT_EQ(mapped.wire_family(), dgram::family::inet4);
+
+    const auto v6{*dgram::endpoint::parse(dgram::family::inet6, "2001:db8::1", 443)};
+    EXPECT_FALSE(v6.is_v4_mapped());
+    EXPECT_EQ(v6.wire_family(), dgram::family::inet6);
+
+    const auto compatible{*dgram::endpoint::parse(dgram::family::inet6, "::192.0.2.7", 443)};
+    EXPECT_FALSE(compatible.is_v4_mapped()) << "the deprecated v4-compatible form is a plain v6 address";
+
+    const auto v4{*dgram::endpoint::parse(dgram::family::inet4, "192.0.2.7", 443)};
+    EXPECT_FALSE(v4.is_v4_mapped());
+    EXPECT_EQ(v4.wire_family(), dgram::family::inet4);
+    EXPECT_FALSE(dgram::endpoint{}.is_v4_mapped());
+}
+
 TEST(Endpoint, RejectsMalformedText) {
     EXPECT_FALSE(dgram::endpoint::parse(dgram::family::inet4, "not-an-address", 1).has_value());
 }

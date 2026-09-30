@@ -12,6 +12,8 @@ layout. Trivially destructible and cheap to copy.
 | `static result<endpoint> parse(family, const char* text, uint16_t port)` | Parse `192.0.2.1` or `2001:db8::1`. `invalid_argument` if `text` does not parse for `family`. |
 | `static endpoint any(family, uint16_t port)` | The wildcard address, for binding. |
 | `bool is_v4() / is_v6() / valid()` | Family predicates. |
+| `bool is_v4_mapped()` | A v6 address of the form `::ffff:a.b.c.d`, which the kernel sends and receives as IPv4. |
+| `family wire_family()` | The family a datagram to this endpoint travels as: `inet4` for a v4-mapped address. |
 | `uint16_t port()` | Port in host byte order. |
 | `socklen_t size()` | Bytes the kernel needs for this family, not `sizeof(sockaddr_storage)`. |
 | `const sockaddr* raw()` | Pointer for passing to a syscall. |
