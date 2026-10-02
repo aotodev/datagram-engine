@@ -43,7 +43,8 @@ for (const auto& d : in->datagrams() | std::views::filter(dgram::is_intact)) {
         (void)out->stage(piece, d.from());
     }
 }
-(void)out->flush(*sock);   // discarding the result keeps a failed send staged
+(void)out->flush(*sock);   // a refused datagram is dropped; the rest still go
+out->discard();            // whatever a stalled flush kept still points into `in`
 ```
 
 `then`, `map`, `recover` and `tap` compose a `result` left to right, in the order

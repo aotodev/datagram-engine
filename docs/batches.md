@@ -105,14 +105,16 @@ bool stage(std::span<const std::byte> payload, const endpoint& to);
 bool stage(std::span<const std::byte> payload, const endpoint& to, const control<Features>&);
 bool stage_copy(std::span<const std::byte> payload, const endpoint& to,
                 const control<Features>& = {});                          // SlotBytes > 0
-result<std::size_t> flush(const socket& sock, int flags = 0);
+flushed flush(const socket& sock, int flags = 0);
+void discard();
 bool full() const;
 std::size_t staged() const;
 ```
 
 `stage` references the caller's bytes rather than copying, so bouncing a datagram
 straight out of a receive slot costs nothing. **The referenced bytes must stay
-valid until `flush` returns.** It yields `false` when the batch is full.
+valid until a flush sends them or `discard()` drops them.** It yields `false`
+when the batch is full.
 
 `stage_copy` copies into the batch's own slot, for bytes that will not outlive
 the flush. It requires `SlotBytes > 0` and yields `false` if the payload exceeds
@@ -122,23 +124,44 @@ The `control` overload attaches ancillary data to that one datagram; see
 [metadata](metadata.md). `msg_controllen` is set from what was actually built,
 zero included, so nothing carries over between datagrams staged in the same slot.
 
-`flush` sends everything staged and clears the batch, returning how many were
-taken. A short send is not an error and the remainder is dropped: datagram
-delivery is unreliable by definition, so requeueing buys nothing a protocol layer
-cannot do better.
+`flush` sends everything staged and reports what happened:
 
-**A failed send leaves the batch staged.** That case is not a short send: nothing
-went out at all, so clearing would hand the caller an empty batch and no way to
-tell what it lost. The argument for dropping a short send's tail is that the
-protocol layer can do better, which is only true while the protocol still has the
-bytes. `EAGAIN` on a non-blocking socket is the ordinary way to get here; flush
-again once the socket is writable, or call `discard()` to drop it.
+| `flushed` member | Description |
+|------------------|-------------|
+| `sent` | Datagrams the kernel took. |
+| `rejected` | Entries dropped because the kernel refused that datagram. |
+| `last_rejection` | Why the last of those was refused. |
+| `stalled` | Why the flush stopped early. Set means entries are still staged. |
+| `drained()` | `stalled` is empty: every entry was sent or rejected. |
+
+`sendmmsg` stops at the first datagram it cannot send, so `flush` decides who the
+error belongs to.
+
+- **The datagram's own** (`EMSGSIZE`, `EHOSTUNREACH`, `EPERM` from a firewall,
+  `EACCES` on broadcast, ...): that entry is dropped and the rest are still sent.
+  One bad destination cannot hold up everyone else in the batch, and a
+  per-destination error that repeats cannot wedge it.
+- **The socket's** (`EAGAIN`, `ENOBUFS`, `ENOMEM`, `EINTR`, `EBADF`, `ENOTSOCK`,
+  `EOPNOTSUPP`): the next entry would hit it too, so `flush` stops. Everything
+  not yet sent stays staged, in order, including the tail of a send that got
+  partway. Flush again once the socket is writable, or `discard()` it.
+
+**Entries a stalled flush keeps still reference the caller's bytes.** If those
+are receive slots, the next `receive` overwrites them, and a later flush would
+send new datagrams' bytes to old datagrams' peers. Flush again before receiving,
+or discard:
 
 ```cpp
-if (const auto sent{tx->flush(*sock)}; !sent && sent.error() == dgram::would_block) {
-    tx->discard();  // or leave it staged and flush again when writable
+const auto sent{tx->flush(*sock)};
+if (sent.stalled == dgram::would_block) {
+    wait_until_writable(*sock);  // then flush again, before the next receive
+} else if (sent.stalled) {
+    tx->discard();
 }
 ```
+
+Stalled entries keep their slots until they go out, so `full()` can be true with
+fewer than `Capacity` staged.
 
 ## Retaining bytes past the batch
 

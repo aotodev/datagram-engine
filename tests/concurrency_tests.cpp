@@ -71,7 +71,7 @@ TEST(Concurrency, WorkersShareNothing) {
                 if (!tx->stage_copy(bytes_of(text), target, marked)) {
                     continue;
                 }
-                ASSERT_TRUE(tx->flush(*peer).has_value());
+                ASSERT_TRUE(tx->flush(*peer).drained());
 
                 // Nonblocking, so poll briefly rather than parking a thread.
                 for (int attempt{}; attempt < 2000; ++attempt) {

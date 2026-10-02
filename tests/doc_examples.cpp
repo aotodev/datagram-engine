@@ -96,7 +96,10 @@ TEST(DocExamples, AtAGlance) {
             }
         }
     }
-    ASSERT_TRUE(out->flush(*sock).has_value());
+    const auto sent{out->flush(*sock)};
+    out->discard();
+    EXPECT_TRUE(sent.drained());
+    EXPECT_EQ(sent.sent, 1u);
     EXPECT_EQ(echoed, 1u);
 }
 

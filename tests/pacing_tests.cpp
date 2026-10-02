@@ -196,8 +196,7 @@ TEST(TransmitTime, PacedDatagramStillArrives) {
 
     ASSERT_TRUE(tx->stage_copy(bytes_of("paced"), target, ancillary));
     const auto sent{tx->flush(*sender)};
-    ASSERT_TRUE(sent.has_value()) << dgram::describe(sent.error());
-    EXPECT_EQ(*sent, 1u);
+    EXPECT_EQ(sent.sent, 1u) << sent.last_rejection.transform(dgram::describe).value_or("stalled");
 
     // Without fq on the interface the kernel ignores the departure time and
     // sends immediately, so this arrives either way. What is asserted is that
