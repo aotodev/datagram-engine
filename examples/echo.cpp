@@ -103,8 +103,14 @@ int main(const int argc, const char* const* argv) {
             }
         }
 
-        if (const auto sent{tx->flush(*sock)}; !sent) {
-            std::println(stderr, "flush: {}", dgram::describe(sent.error()));
+        const auto sent{tx->flush(*sock)};
+        if (sent.last_rejection) {
+            std::println(stderr, "flush: {} refused, last: {}", sent.rejected, dgram::describe(*sent.last_rejection));
+        }
+        if (sent.stalled) {
+            // What is still staged points into the receive slots the next receive overwrites.
+            std::println(stderr, "flush stalled: {}", dgram::describe(*sent.stalled));
+            tx->discard();
         }
     }
 }

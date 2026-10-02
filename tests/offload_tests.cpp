@@ -127,7 +127,7 @@ TEST(Offload, GsoSendCoalescesIntoOneGroSlot) {
     ancillary.set<dgram::segment>(mtu);
     ASSERT_TRUE(tx->stage(payload, net.target, ancillary));
     const auto sent{tx->flush(net.sender)};
-    ASSERT_TRUE(sent.has_value()) << dgram::describe(sent.error());
+    ASSERT_EQ(sent.sent, 1u) << sent.last_rejection.transform(dgram::describe).value_or("stalled");
 
     ASSERT_EQ(*rx->receive(net.receiver), 1u) << "GRO should deliver the lot in one slot";
 
@@ -165,7 +165,7 @@ TEST(Offload, UncoalescedDatagramIsOneSegment) {
     ASSERT_TRUE(rx.has_value() && tx.has_value());
 
     ASSERT_TRUE(tx->stage_copy(bytes_of("a single small datagram"), net.target));
-    ASSERT_TRUE(tx->flush(net.sender).has_value());
+    ASSERT_TRUE(tx->flush(net.sender).drained());
 
     ASSERT_EQ(*rx->receive(net.receiver), 1u);
     const auto view{rx->datagrams()};
@@ -190,7 +190,7 @@ TEST(Offload, SegmentAndEcnTravelTogether) {
     ancillary.set<dgram::traffic_class>({.ecn = dgram::ecn_codepoint::ect0});
 
     ASSERT_TRUE(tx->stage(payload, net.target, ancillary));
-    ASSERT_TRUE(tx->flush(net.sender).has_value());
+    ASSERT_TRUE(tx->flush(net.sender).drained());
 
     ASSERT_EQ(*rx->receive(net.receiver), 1u);
     const auto view{rx->datagrams()};
@@ -218,7 +218,7 @@ TEST(Offload, UndersizedSlotReportsTruncation) {
     dgram::control<tx_set> ancillary{};
     ancillary.set<dgram::segment>(mtu);
     ASSERT_TRUE(tx->stage(payload, target, ancillary));
-    ASSERT_TRUE(tx->flush(sender).has_value());
+    ASSERT_TRUE(tx->flush(sender).drained());
 
     ASSERT_EQ(*rx->receive(receiver), 1u);
     const auto view{rx->datagrams()};

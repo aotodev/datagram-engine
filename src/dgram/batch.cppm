@@ -327,13 +327,69 @@ private:
  * Transmit
  * ============================================================================ */
 
+/** @brief What one `flush` did. */
+export struct flushed {
+    std::size_t sent{};                   ///< datagrams the kernel took
+    std::size_t rejected{};               ///< entries dropped because the kernel refused that datagram
+    std::optional<errc> last_rejection{}; ///< why the last of those was refused
+    std::optional<errc> stalled{};        ///< why it stopped early; every unsent entry is still staged
+
+    /** @brief Nothing is left staged: every entry was sent or rejected. */
+    [[nodiscard]] constexpr bool drained() const noexcept { return !stalled.has_value(); }
+};
+
+namespace detail {
+
+/**
+ * @brief Errors that belong to the socket or the moment, not to one datagram.
+ *
+ * Retrying the next entry would hit them again, so they stop a flush. Anything
+ * else is the datagram's own fault and drops only that entry.
+ */
+inline constexpr std::array socket_errors{would_block, interrupted, out_of_memory, errc{ENOBUFS}, errc{EBADF}, errc{ENOTSOCK}, errc{EOPNOTSUPP}};
+
+/**
+ * @brief Send `pending` front to back, through `send` standing in for one `sendmmsg`.
+ *
+ * `sendmmsg` stops at the first datagram it cannot send and, if it sent any
+ * before it, reports only the count. The next call starts at that datagram and
+ * gets its error. Exactly `sent + rejected` entries from the front are consumed.
+ */
+export template <typename Send>
+    requires std::is_invocable_r_v<result<int>, Send&, std::span<::mmsghdr>>
+[[nodiscard]] flushed send_all(std::span<::mmsghdr> pending, Send&& send) noexcept {
+    flushed out{};
+    while (!pending.empty()) {
+        const auto n{std::invoke(send, pending)};
+        if (n.has_value() && *n > 0) {
+            const auto taken{std::min(static_cast<std::size_t>(*n), pending.size())};
+            out.sent += taken;
+            pending = pending.subspan(taken);
+            continue;
+        }
+        // A zero count, which a non-empty vector never gets, stalls rather than spins.
+        const auto e{n.error_or(would_block)};
+        if (std::ranges::contains(socket_errors, e)) {
+            out.stalled = e;
+            return out;
+        }
+        ++out.rejected;
+        out.last_rejection = e;
+        pending = pending.subspan(1);
+    }
+    return out;
+}
+
+} // namespace detail
+
 /**
  * @brief Fixed-size `sendmmsg` argument block over caller-provided memory.
  *
  * `stage` references the caller's bytes instead of copying them, so echoing
  * straight out of a `receive_batch` slot costs nothing. The referenced bytes
- * must stay put until `flush` returns. `SlotBytes` of zero carves no payload
- * memory at all and leaves only the referencing path available.
+ * must stay put until a flush sends them or `discard()` drops them, which a
+ * stalled flush postpones. `SlotBytes` of zero carves no payload memory at all
+ * and leaves only the referencing path available.
  */
 export template <std::size_t Capacity, std::size_t SlotBytes = 0, feature_set Features = no_features> class transmit_batch {
     static_assert(Capacity > 0 && Capacity <= IOV_MAX, "capacity must fit IOV_MAX");
@@ -368,9 +424,16 @@ public:
         return b;
     }
 
-    /** @brief Whether another datagram fits before a flush is required. */
-    [[nodiscard]] constexpr bool full() const noexcept { return staged_ == Capacity; }
-    [[nodiscard]] constexpr std::size_t staged() const noexcept { return staged_; }
+    /**
+     * @brief Whether another datagram fits before a flush is required.
+     *
+     * Entries a stalled flush left behind keep their slots, so this can be
+     * true with fewer than `Capacity` staged.
+     */
+    [[nodiscard]] constexpr bool full() const noexcept { return end_ == Capacity; }
+
+    /** @brief Entries waiting to be sent. */
+    [[nodiscard]] constexpr std::size_t staged() const noexcept { return end_ - head_; }
 
     /**
      * @brief Queue `payload` for `to`, referencing the bytes in place.
@@ -396,7 +459,7 @@ public:
         if (full()) [[unlikely]] {
             return false;
         }
-        const auto i{staged_++};
+        const auto i{end_++};
         addrs_[i] = to;
         // sendmmsg only reads through iov_base, but the field is not const-qualified.
         iovs_[i].iov_base = const_cast<std::byte*>(payload.data());
@@ -417,38 +480,38 @@ public:
         if (full() || payload.size() > SlotBytes) [[unlikely]] {
             return false;
         }
-        const auto dest{payload_.subspan(staged_ * SlotBytes, payload.size())};
+        const auto dest{payload_.subspan(end_ * SlotBytes, payload.size())};
         std::ranges::copy(payload, dest.begin());
         return stage(dest, to, ancillary);
     }
 
     /**
-     * @brief Send everything staged, then clear the batch.
+     * @brief Send everything staged, dropping only what the kernel refuses.
      *
-     * A short send is not an error: `sendmmsg` reports how many it took and the
-     * remainder is dropped. Datagram delivery is unreliable by definition, so
-     * requeueing the tail buys nothing a protocol layer cannot do better.
-     *
-     * **A failed send is different and the batch is left staged.** Nothing went
-     * out, so clearing would hand the caller an empty batch and no way to know
-     * what it lost, and "a protocol layer can do better" is only true while the
-     * protocol still has the bytes. `EAGAIN` on a non-blocking socket is the
-     * common case: flush again once it is writable, or `discard()` to drop it.
+     * An error that belongs to one datagram (`EMSGSIZE`, `EHOSTUNREACH`,
+     * `EPERM`, ...) drops that entry, counts it in `rejected`, and the rest are
+     * still sent, so one bad destination cannot hold up the batch. An error that
+     * belongs to the socket (`EAGAIN`, `ENOBUFS`, `EINTR`, `EBADF`, ...) stops
+     * the flush and sets `stalled`. Everything not yet sent stays staged and
+     * still references the caller's bytes: flush again once the socket is
+     * writable, or `discard()` it before those bytes change.
      */
-    [[nodiscard]] result<std::size_t> flush(const socket& sock, const int flags = 0) noexcept {
-        if (staged_ == 0) {
-            return std::size_t{0};
+    [[nodiscard]] flushed flush(const socket& sock, const int flags = 0) noexcept {
+        const auto out{detail::send_all(msgs_.subspan(head_, end_ - head_), [&sock, flags](const std::span<::mmsghdr> pending) noexcept {
+            return invoke_syscall(::sendmmsg, sock.native(), pending.data(), static_cast<unsigned>(pending.size()), flags);
+        })};
+        head_ += out.sent + out.rejected;
+        if (head_ == end_) {
+            discard();
         }
-        const int n{::sendmmsg(sock.native(), msgs_.data(), static_cast<unsigned>(staged_), flags)};
-        if (n < 0) [[unlikely]] {
-            return fail<std::size_t>();
-        }
-        staged_ = 0;
-        return static_cast<std::size_t>(n);
+        return out;
     }
 
-    /** @brief Drop everything staged without sending it, after a failed `flush`. */
-    void discard() noexcept { staged_ = 0; }
+    /** @brief Drop everything staged without sending it. */
+    void discard() noexcept {
+        head_ = 0;
+        end_ = 0;
+    }
 
 private:
     transmit_batch() noexcept = default;
@@ -481,7 +544,8 @@ private:
     std::span<endpoint> addrs_{};
     std::span<std::byte> control_{};
     std::span<std::byte> payload_{};
-    std::size_t staged_{};
+    std::size_t head_{}; ///< first entry not yet sent; a stalled flush leaves it past zero
+    std::size_t end_{};  ///< one past the last staged entry, where `stage` writes next
 };
 
 } // namespace dgram

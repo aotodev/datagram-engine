@@ -58,7 +58,7 @@ TEST(Metadata, ReportsDestinationAddressOverIPv4) {
     ASSERT_TRUE(rx.has_value() && tx.has_value());
 
     ASSERT_TRUE(tx->stage_copy(bytes_of("where did i land"), net.target));
-    ASSERT_TRUE(tx->flush(net.sender).has_value());
+    ASSERT_TRUE(tx->flush(net.sender).drained());
 
     ASSERT_EQ(*rx->receive(net.receiver), 1u);
     const auto view{rx->datagrams()};
@@ -79,7 +79,7 @@ TEST(Metadata, ReportsDestinationAddressOverIPv6) {
     ASSERT_TRUE(rx.has_value() && tx.has_value());
 
     ASSERT_TRUE(tx->stage_copy(bytes_of("v6 please"), net.target));
-    ASSERT_TRUE(tx->flush(net.sender).has_value());
+    ASSERT_TRUE(tx->flush(net.sender).drained());
 
     ASSERT_EQ(*rx->receive(net.receiver), 1u);
     const auto view{rx->datagrams()};
@@ -103,7 +103,7 @@ TEST_P(EcnRoundTrip, MarkedCodepointSurvives) {
         dgram::control<tx_set> ancillary{};
         ancillary.set<dgram::traffic_class>({.ecn = marked});
         ASSERT_TRUE(tx->stage_copy(bytes_of("marked"), net.target, ancillary));
-        ASSERT_TRUE(tx->flush(net.sender).has_value());
+        ASSERT_TRUE(tx->flush(net.sender).drained());
 
         ASSERT_EQ(*rx->receive(net.receiver), 1u);
         const auto view{rx->datagrams()};
@@ -124,7 +124,7 @@ TEST(Metadata, UnmarkedDatagramReadsAsNotEct) {
     ASSERT_TRUE(rx.has_value() && tx.has_value());
 
     ASSERT_TRUE(tx->stage_copy(bytes_of("plain"), net.target));
-    ASSERT_TRUE(tx->flush(net.sender).has_value());
+    ASSERT_TRUE(tx->flush(net.sender).drained());
 
     ASSERT_EQ(*rx->receive(net.receiver), 1u);
     const auto view{rx->datagrams()};
@@ -177,7 +177,7 @@ TEST_P(TrafficClass, DscpAndEcnArriveTogether) {
         dgram::control<tx_set> ancillary{};
         ancillary.set<dgram::traffic_class>(sent);
         ASSERT_TRUE(tx->stage_copy(bytes_of("marked"), net.target, ancillary));
-        ASSERT_TRUE(tx->flush(net.sender).has_value());
+        ASSERT_TRUE(tx->flush(net.sender).drained());
 
         ASSERT_EQ(*rx->receive(net.receiver), 1u);
         const auto meta{(*rx->datagrams().begin()).meta()};
@@ -198,14 +198,14 @@ TEST_P(TrafficClass, PerDatagramMarkingReplacesTheSocketDscp) {
     ASSERT_TRUE(rx.has_value() && tx.has_value());
 
     ASSERT_TRUE(tx->stage_copy(bytes_of("socket default"), net.target));
-    ASSERT_TRUE(tx->flush(net.sender).has_value());
+    ASSERT_TRUE(tx->flush(net.sender).drained());
     ASSERT_EQ(*rx->receive(net.receiver), 1u);
     EXPECT_EQ((*rx->datagrams().begin()).meta().get<dgram::traffic_class>()->dscp, dgram::dscp::ef);
 
     dgram::control<tx_set> ancillary{};
     ancillary.set<dgram::traffic_class>({.ecn = dgram::ecn_codepoint::ect0});
     ASSERT_TRUE(tx->stage_copy(bytes_of("own marking"), net.target, ancillary));
-    ASSERT_TRUE(tx->flush(net.sender).has_value());
+    ASSERT_TRUE(tx->flush(net.sender).drained());
     ASSERT_EQ(*rx->receive(net.receiver), 1u);
     const auto got{*(*rx->datagrams().begin()).meta().get<dgram::traffic_class>()};
     EXPECT_EQ(got.dscp, dgram::dscp::df) << "the datagram said df, and that wins over the socket";
@@ -248,7 +248,7 @@ TEST(DualStack, ReportsEcnForIPv4Arrivals) {
         dgram::control<tx_set> ancillary{};
         ancillary.set<dgram::traffic_class>({.ecn = marked});
         ASSERT_TRUE(tx->stage_copy(bytes_of("from v4"), target, ancillary));
-        ASSERT_TRUE(tx->flush(net.sender).has_value());
+        ASSERT_TRUE(tx->flush(net.sender).drained());
 
         ASSERT_EQ(*rx->receive(receiver), 1u);
         const auto d{*rx->datagrams().begin()};
@@ -277,7 +277,7 @@ TEST(DualStack, MarksEcnOnDatagramsToV4MappedPeers) {
         ancillary.set<dgram::traffic_class>({.ecn = marked});
         ASSERT_TRUE(tx->stage_copy(bytes_of("to v4-mapped"), target, ancillary));
         const auto sent{tx->flush(sender)};
-        ASSERT_TRUE(sent.has_value()) << dgram::describe(sent.error());
+        ASSERT_EQ(sent.sent, 1u) << sent.last_rejection.transform(dgram::describe).value_or("stalled");
 
         ASSERT_EQ(*rx->receive(net.receiver), 1u);
         const auto& got{(*rx->datagrams().begin()).meta().get<dgram::ecn>()};
@@ -306,7 +306,7 @@ TEST(DualStack, RepliesToAnIPv4PeerFromTheArrivalAddress) {
     dgram::control<tx_set> request{};
     request.set<dgram::traffic_class>({.ecn = dgram::ecn_codepoint::ect1});
     ASSERT_TRUE(client_tx->stage_copy(bytes_of("ping"), server_target, request));
-    ASSERT_TRUE(client_tx->flush(client.receiver).has_value());
+    ASSERT_TRUE(client_tx->flush(client.receiver).drained());
 
     ASSERT_EQ(*server_rx->receive(server), 1u);
     const auto arrival{*server_rx->datagrams().begin()};
@@ -318,7 +318,7 @@ TEST(DualStack, RepliesToAnIPv4PeerFromTheArrivalAddress) {
     reply.set<dgram::traffic_class>({.ecn = *meta.get<dgram::ecn>()});
     ASSERT_TRUE(server_tx->stage_copy(bytes_of("pong"), arrival.from(), reply));
     const auto sent{server_tx->flush(server)};
-    ASSERT_TRUE(sent.has_value()) << dgram::describe(sent.error());
+    ASSERT_EQ(sent.sent, 1u) << sent.last_rejection.transform(dgram::describe).value_or("stalled");
 
     ASSERT_EQ(*client_rx->receive(client.receiver), 1u);
     const auto back{*client_rx->datagrams().begin()};
@@ -352,7 +352,7 @@ TEST(Metadata, FeatureNeverEnabledReadsAsAbsent) {
     ASSERT_TRUE(rx.has_value() && tx.has_value());
 
     ASSERT_TRUE(tx->stage_copy(bytes_of("only ecn"), target));
-    ASSERT_TRUE(tx->flush(sender).has_value());
+    ASSERT_TRUE(tx->flush(sender).drained());
 
     ASSERT_EQ(*rx->receive(receiver), 1u);
     const auto view{rx->datagrams()};
@@ -379,7 +379,7 @@ TEST(Metadata, UndersizedControlBufferTruncatesWithoutOverreading) {
     ASSERT_TRUE(rx.has_value() && tx.has_value());
 
     ASSERT_TRUE(tx->stage_copy(bytes_of("too much metadata"), target));
-    ASSERT_TRUE(tx->flush(sender).has_value());
+    ASSERT_TRUE(tx->flush(sender).drained());
 
     ASSERT_EQ(*rx->receive(receiver), 1u);
     const auto view{rx->datagrams()};
@@ -408,7 +408,7 @@ TEST(Metadata, StaleControlLengthDoesNotLeakBetweenDatagrams) {
     marked.set<dgram::traffic_class>({.ecn = dgram::ecn_codepoint::ce});
 
     ASSERT_TRUE(tx->stage_copy(bytes_of("marked"), net.target, marked));
-    ASSERT_TRUE(tx->flush(net.sender).has_value());
+    ASSERT_TRUE(tx->flush(net.sender).drained());
     ASSERT_EQ(*rx->receive(net.receiver), 1u);
     {
         const auto view{rx->datagrams()};
@@ -417,7 +417,7 @@ TEST(Metadata, StaleControlLengthDoesNotLeakBetweenDatagrams) {
 
     // Same slot, now with nothing attached.
     ASSERT_TRUE(tx->stage_copy(bytes_of("plain"), net.target));
-    ASSERT_TRUE(tx->flush(net.sender).has_value());
+    ASSERT_TRUE(tx->flush(net.sender).drained());
     ASSERT_EQ(*rx->receive(net.receiver), 1u);
     {
         const auto view{rx->datagrams()};

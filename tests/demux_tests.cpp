@@ -382,7 +382,7 @@ TEST(Route, DeliversToTheMatchingFlowAndReportsTheRest) {
 
     const auto say = [&](dgram::socket& s, std::string_view text) {
         ASSERT_TRUE(tx->stage_copy({reinterpret_cast<const std::byte*>(text.data()), text.size()}, net.target));
-        ASSERT_TRUE(tx->flush(s).has_value());
+        ASSERT_TRUE(tx->flush(s).drained());
     };
     say(*known, "from-known");
     say(*stranger, "from-stranger");
@@ -443,7 +443,7 @@ TEST(Route, CoalescedSlotRoutesPerDatagramNotPerSlot) {
     dgram::control<tx_set> ancillary{};
     ancillary.set<dgram::segment>(mtu);
     ASSERT_TRUE(tx->stage(payload, net.target, ancillary));
-    ASSERT_TRUE(tx->flush(*sender).has_value());
+    ASSERT_TRUE(tx->flush(*sender).drained());
 
     ASSERT_EQ(*rx->receive(net.receiver), 1u) << "GRO should coalesce into one slot";
     {
@@ -475,7 +475,7 @@ TEST(Route, TruncatedDatagramsAreCountedNotDelivered) {
 
     constexpr std::string_view text{"far longer than eight bytes"};
     ASSERT_TRUE(tx->stage_copy({reinterpret_cast<const std::byte*>(text.data()), text.size()}, net.target));
-    ASSERT_TRUE(tx->flush(*sender).has_value());
+    ASSERT_TRUE(tx->flush(*sender).drained());
 
     ASSERT_EQ(*rx->receive(net.receiver), 1u);
     const auto counts{dgram::route(*rx, dgram::by_peer{}, *table, 0ns)};
@@ -507,7 +507,7 @@ struct routing_fixture {
     template <typename Table, typename Unmatched, typename... Context>
     dgram::routed exchange(rx_batch& rx, tx_batch& tx, dgram::socket& s, std::string_view text, Table& table, Unmatched&& unmatched, Context&&... context) {
         EXPECT_TRUE(tx.stage_copy({reinterpret_cast<const std::byte*>(text.data()), text.size()}, net.target));
-        EXPECT_TRUE(tx.flush(s).has_value());
+        EXPECT_TRUE(tx.flush(s).drained());
 
         for (int attempt{}; attempt < 100; ++attempt) {
             if (const auto got{rx.receive(net.receiver)}; got && *got > 0) {
@@ -674,7 +674,7 @@ TEST(Route, ReportsHowManySlotsTheDatagramsCameIn) {
     dgram::control<tx_set> ancillary{};
     (void)ancillary.set<dgram::segment>(stride);
     ASSERT_TRUE(tx->stage_copy(payload, net.target, ancillary));
-    ASSERT_TRUE(tx->flush(*sender).has_value());
+    ASSERT_TRUE(tx->flush(*sender).drained());
 
     dgram::routed counts{};
     for (int attempt{}; attempt < 100 && counts.handled() < 4; ++attempt) {

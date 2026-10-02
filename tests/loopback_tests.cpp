@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 #include <gtest/gtest.h>
 
+#include <cerrno>
 #include <sys/socket.h>
 
 import std;
@@ -99,8 +100,8 @@ TEST(Loopback, DeliversAWholeBatch) {
         ASSERT_TRUE(tx->stage_copy(bytes_of(p), net.target));
     }
     const auto sent{tx->flush(net.sender)};
-    ASSERT_TRUE(sent.has_value());
-    EXPECT_EQ(*sent, sent_count);
+    ASSERT_TRUE(sent.drained());
+    EXPECT_EQ(sent.sent, sent_count);
 
     const auto got{rx->receive(net.receiver)};
     ASSERT_TRUE(got.has_value());
@@ -125,7 +126,7 @@ TEST(Loopback, SurvivesRepeatedReceivesOnTheSameBatch) {
     for (int round{}; round < 4; ++round) {
         const auto text{std::format("round-{}", round)};
         ASSERT_TRUE(tx->stage_copy(bytes_of(text), net.target));
-        ASSERT_TRUE(tx->flush(net.sender).has_value());
+        ASSERT_TRUE(tx->flush(net.sender).drained());
 
         const auto got{rx->receive(net.receiver)};
         ASSERT_TRUE(got.has_value());
@@ -150,7 +151,7 @@ TEST(Loopback, ReportsTruncationRatherThanCorrupting) {
     ASSERT_TRUE(tx.has_value());
 
     ASSERT_TRUE(tx->stage_copy(bytes_of("far longer than eight bytes"), net.target));
-    ASSERT_TRUE(tx->flush(net.sender).has_value());
+    ASSERT_TRUE(tx->flush(net.sender).drained());
 
     const auto got{rx->receive(net.receiver)};
     ASSERT_TRUE(got.has_value());
@@ -174,7 +175,7 @@ TEST(Loopback, CallerMsgTruncDoesNotStretchThePayloadPastTheSlot) {
     ASSERT_TRUE(tx.has_value());
 
     ASSERT_TRUE(tx->stage_copy(bytes_of("far longer than eight bytes"), net.target));
-    ASSERT_TRUE(tx->flush(net.sender).has_value());
+    ASSERT_TRUE(tx->flush(net.sender).drained());
 
     ASSERT_EQ(*rx->receive(net.receiver, MSG_TRUNC), 1u);
     const auto d{*rx->datagrams().begin()};
@@ -205,7 +206,7 @@ TEST(Loopback, NonblockingReceiveReportsWouldBlockThenRecovers) {
 
     constexpr std::string_view text{"after the empty poll"};
     ASSERT_TRUE(tx->stage_copy(bytes_of(text), target));
-    ASSERT_TRUE(tx->flush(sender).has_value());
+    ASSERT_TRUE(tx->flush(sender).drained());
 
     // Poll until the loopback datagram lands; the point is what arrives, not when.
     dgram::result<std::size_t> got{std::unexpected{dgram::would_block}};
@@ -264,29 +265,150 @@ TEST(Error, PipeCombinatorsChainLeftToRight) {
     EXPECT_EQ(*recovered, 7);
 }
 
-/* A failed send is not a short send: nothing left, so the caller must still be
-   holding everything it staged. Clearing here would lose datagrams silently for
-   any caller that stages by reference and then drops its own copy. */
-TEST(TransmitBatch, AFailedFlushLeavesTheBatchStaged) {
+/* ============================================================================
+ * Flushing: who an error belongs to
+ * ============================================================================ */
+
+/** Stands in for sendmmsg: replays scripted results and records each call's vector length. */
+struct scripted_send {
+    std::vector<dgram::result<int>> script;
+    std::vector<std::size_t> lengths{};
+
+    dgram::result<int> operator()(const std::span<::mmsghdr> pending) {
+        lengths.push_back(pending.size());
+        const auto next{script.front()};
+        script.erase(script.begin());
+        return next;
+    }
+};
+
+/* sendmmsg reports a datagram's error only on the call that starts at it. */
+TEST(SendAll, ARejectedDatagramIsSkippedAndTheRestStillGo) {
+    std::array<::mmsghdr, 6> msgs{};
+    scripted_send send{{2, std::unexpected{dgram::message_too_long}, 3}};
+
+    const auto out{dgram::detail::send_all(msgs, send)};
+    EXPECT_EQ(out.sent, 5u);
+    EXPECT_EQ(out.rejected, 1u);
+    EXPECT_EQ(out.last_rejection, dgram::message_too_long);
+    EXPECT_TRUE(out.drained());
+    EXPECT_EQ(send.lengths, (std::vector<std::size_t>{6, 4, 3})) << "each call starts where the last one stopped";
+}
+
+TEST(SendAll, ASocketErrorStopsAfterWhatWasAlreadySent) {
+    std::array<::mmsghdr, 6> msgs{};
+    scripted_send send{{2, std::unexpected{dgram::errc{EHOSTUNREACH}}, std::unexpected{dgram::would_block}}};
+
+    const auto out{dgram::detail::send_all(msgs, send)};
+    EXPECT_EQ(out.sent, 2u);
+    EXPECT_EQ(out.rejected, 1u);
+    EXPECT_EQ(out.stalled, dgram::would_block);
+    EXPECT_FALSE(out.drained());
+    EXPECT_EQ(send.lengths, (std::vector<std::size_t>{6, 4, 3})) << "three entries consumed, three left";
+}
+
+TEST(SendAll, EverySocketLevelErrorStalls) {
+    for (const auto e : {dgram::would_block, dgram::interrupted, dgram::out_of_memory, dgram::errc{ENOBUFS}, dgram::errc{EBADF}, dgram::errc{ENOTSOCK},
+             dgram::errc{EOPNOTSUPP}}) {
+        std::array<::mmsghdr, 2> msgs{};
+        scripted_send send{{std::unexpected{e}}};
+        const auto out{dgram::detail::send_all(msgs, send)};
+        EXPECT_EQ(out.stalled, e) << dgram::describe(e);
+        EXPECT_EQ(out.sent + out.rejected, 0u);
+    }
+}
+
+TEST(SendAll, AZeroCountStallsRatherThanSpins) {
+    std::array<::mmsghdr, 2> msgs{};
+    scripted_send send{{0}};
+    const auto out{dgram::detail::send_all(msgs, send)};
+    EXPECT_EQ(out.stalled, dgram::would_block);
+    EXPECT_EQ(send.lengths.size(), 1u);
+}
+
+/* The bug this guards: an error on the first entry used to leave the whole batch
+   staged, so one destination the kernel always refuses stopped every reply. */
+TEST(TransmitBatch, ARefusedDatagramIsDroppedAndTheRestStillGo) {
+    loopback net{};
+    auto rx{rx_batch::carve(net.arena)};
+    auto tx{tx_batch::carve(net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    const std::vector<std::byte> oversized(70'000); // past the 65507-byte UDP limit: EMSGSIZE
+    ASSERT_TRUE(tx->stage(oversized, net.target));
+    ASSERT_TRUE(tx->stage_copy(bytes_of("first"), net.target));
+    ASSERT_TRUE(tx->stage(oversized, net.target));
+    ASSERT_TRUE(tx->stage_copy(bytes_of("second"), net.target));
+
+    const auto sent{tx->flush(net.sender)};
+    EXPECT_EQ(sent.sent, 2u);
+    EXPECT_EQ(sent.rejected, 2u);
+    EXPECT_EQ(sent.last_rejection, dgram::message_too_long);
+    EXPECT_TRUE(sent.drained());
+    EXPECT_EQ(tx->staged(), 0u);
+
+    ASSERT_EQ(*rx->receive(net.receiver), 2u);
+    const auto texts{rx->datagrams() | std::views::transform([](const auto& d) {
+        return std::string{reinterpret_cast<const char*>(d.payload().data()), d.payload().size()};
+    }) | std::ranges::to<std::vector>()};
+    EXPECT_EQ(texts, (std::vector<std::string>{"first", "second"}));
+}
+
+TEST(TransmitBatch, ADestinationTheSocketCannotReachIsRejectedNotKept) {
     libmem::arena arena{dgram::transmit_batch<4, 64>::footprint()};
     auto tx{dgram::transmit_batch<4, 64>::carve(arena)};
     ASSERT_TRUE(tx.has_value());
-
-    // A socket that cannot send: never bound, and pointed at nothing reachable.
     auto sender{dgram::socket::open<dgram::nonblocking>(dgram::family::inet4)};
     ASSERT_TRUE(sender.has_value());
-    const auto unreachable{*dgram::endpoint::parse(dgram::family::inet6, "::1", 9)};
 
     const std::array<std::byte, 4> payload{};
-    ASSERT_TRUE(tx->stage_copy(payload, unreachable));
-    ASSERT_EQ(tx->staged(), 1u);
+    ASSERT_TRUE(tx->stage_copy(payload, *dgram::endpoint::parse(dgram::family::inet6, "::1", 9)));
 
     const auto sent{tx->flush(*sender)};
-    ASSERT_FALSE(sent.has_value()) << "a v6 destination on a v4 socket cannot be sent";
-    EXPECT_EQ(tx->staged(), 1u) << "the caller has to be able to see what did not go";
+    EXPECT_EQ(sent.rejected, 1u) << "a v6 destination on a v4 socket is that datagram's problem";
+    EXPECT_TRUE(sent.last_rejection.has_value());
+    EXPECT_EQ(tx->staged(), 0u);
+}
+
+/* A socket-level error keeps everything staged, in order, and the batch keeps
+   accepting entries behind it. MSG_OOB is refused for UDP before any datagram. */
+TEST(TransmitBatch, AStalledFlushKeepsTheBatchStagedForTheNextOne) {
+    loopback net{};
+    auto rx{rx_batch::carve(net.arena)};
+    auto tx{tx_batch::carve(net.arena)};
+    ASSERT_TRUE(rx.has_value() && tx.has_value());
+
+    ASSERT_TRUE(tx->stage_copy(bytes_of("one"), net.target));
+    ASSERT_TRUE(tx->stage_copy(bytes_of("two"), net.target));
+
+    const auto stalled{tx->flush(net.sender, MSG_OOB)};
+    EXPECT_EQ(stalled.stalled, dgram::errc{EOPNOTSUPP});
+    EXPECT_EQ(stalled.sent + stalled.rejected, 0u);
+    EXPECT_EQ(tx->staged(), 2u) << "the caller has to be able to see what did not go";
+
+    ASSERT_TRUE(tx->stage_copy(bytes_of("three"), net.target));
+    const auto sent{tx->flush(net.sender)};
+    EXPECT_TRUE(sent.drained());
+    EXPECT_EQ(sent.sent, 3u);
+    EXPECT_EQ(tx->staged(), 0u);
+
+    ASSERT_EQ(*rx->receive(net.receiver), 3u);
+    const auto texts{rx->datagrams() | std::views::transform([](const auto& d) {
+        return std::string{reinterpret_cast<const char*>(d.payload().data()), d.payload().size()};
+    }) | std::ranges::to<std::vector>()};
+    EXPECT_EQ(texts, (std::vector<std::string>{"one", "two", "three"}));
+}
+
+TEST(TransmitBatch, DiscardDropsAStalledBatch) {
+    loopback net{};
+    auto tx{tx_batch::carve(net.arena)};
+    ASSERT_TRUE(tx.has_value());
+    ASSERT_TRUE(tx->stage_copy(bytes_of("dropped"), net.target));
+    ASSERT_FALSE(tx->flush(net.sender, MSG_OOB).drained());
 
     tx->discard();
     EXPECT_EQ(tx->staged(), 0u);
+    EXPECT_FALSE(tx->full());
 }
 
 } // namespace
