@@ -95,7 +95,10 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
             break;
         }
         default: { // advance
-            now += 1 + (ops.next() % 9);
+            // Mostly short steps, which land on every cascade; sometimes a jump
+            // across up to two horizons, which advance skips in one go.
+            const auto step{ops.next()};
+            now += (step & 0x80U) != 0 ? 1 + ((step & 0x7FU) * 4U) : 1 + (step % 9);
 
             std::vector<std::uint32_t> fired{};
             (void)w->advance(epoch + tick * static_cast<std::int64_t>(now), [&](const std::uint32_t id) { fired.push_back(id); });

@@ -82,7 +82,8 @@ public:
     static constexpr std::uint64_t horizon{std::uint64_t{1} << (Levels * slot_bits)};
 
     static constexpr std::size_t footprint() noexcept {
-        return Capacity * sizeof(entry) + alignof(entry) - 1 + slot_count * sizeof(std::uint32_t) + alignof(std::uint32_t) - 1;
+        return Capacity * sizeof(entry) + alignof(entry) - 1 + slot_count * sizeof(std::uint32_t) + alignof(std::uint32_t) - 1 +
+               bitmap_words * sizeof(std::uint64_t) + alignof(std::uint64_t) - 1;
     }
 
     /**
@@ -99,14 +100,17 @@ public:
         timer_wheel w{};
         auto* entries{static_cast<entry*>(resource.allocate(Capacity * sizeof(entry), alignof(entry)))};
         auto* heads{static_cast<std::uint32_t*>(resource.allocate(slot_count * sizeof(std::uint32_t), alignof(std::uint32_t)))};
-        if (entries == nullptr || heads == nullptr) [[unlikely]] {
+        auto* occupied{static_cast<std::uint64_t*>(resource.allocate(bitmap_words * sizeof(std::uint64_t), alignof(std::uint64_t)))};
+        if (entries == nullptr || heads == nullptr || occupied == nullptr) [[unlikely]] {
             return std::unexpected{out_of_memory};
         }
 
         w.entries_ = {entries, Capacity};
         w.heads_ = {heads, slot_count};
+        w.occupied_ = {occupied, bitmap_words};
         std::ranges::uninitialized_value_construct(w.entries_);
         std::ranges::fill(w.heads_, nil);
+        std::ranges::fill(w.occupied_, std::uint64_t{0});
 
         w.tick_ = tick;
         w.epoch_ = start;
@@ -177,6 +181,10 @@ public:
     /**
      * @brief Advance to `now`, firing everything due, oldest tick first.
      *
+     * Goes straight from one tick with work to the next, so the cost follows the
+     * timers armed rather than the time elapsed: an idle wheel, or a `now` far
+     * ahead, is reached in one step.
+     *
      * @param fire Called with each expired payload. Scheduling from inside it is
      *             safe; a timer scheduled for a tick already passed fires on the
      *             next `advance`, not recursively during this one.
@@ -186,8 +194,8 @@ public:
         const auto target{tick_of(now)};
         std::size_t fired{};
 
-        while (now_tick_ < target) {
-            ++now_tick_;
+        for (auto next{next_visit()}; next.has_value() && *next <= target; next = next_visit()) {
+            now_tick_ = *next;
 
             // Cascade before firing: when the low wheel wraps, the timers for
             // this tick are still sitting in a coarser wheel.
@@ -201,8 +209,9 @@ public:
                 }
             }
 
-            fired += drain(head_at(0, index), std::forward<Fire>(fire));
+            fired += drain(head_at(0, index), fire);
         }
+        now_tick_ = std::max(now_tick_, target);
         return fired;
     }
 
@@ -280,6 +289,9 @@ private:
         bool live{false};
     };
 
+    static constexpr std::size_t words_per_level{(SlotsPerLevel + 63) / 64};
+    static constexpr std::size_t bitmap_words{Levels * words_per_level};
+
     timer_wheel() noexcept = default;
 
     [[nodiscard]] std::uint32_t& head_at(const std::size_t level, const std::size_t index) noexcept { return heads_[level * SlotsPerLevel + index]; }
@@ -321,6 +333,56 @@ private:
         return (Levels - 1) * SlotsPerLevel + static_cast<std::size_t>((deadline >> ((Levels - 1) * slot_bits)) & slot_mask);
     }
 
+    /**
+     * @brief The first tick after now that visits an occupied slot, or nothing when all are empty.
+     *
+     * Every tick before it visits only empty slots and changes nothing, which is
+     * what lets `advance` skip them. Relies on slots being absolute: an entry
+     * sits at its deadline's digit, so the visit that handles it never moves.
+     * A level visits one slot per `unit` ticks, in order from the cursor, so the
+     * first occupied slot after the cursor is visited first and the cursor's own
+     * slot comes round last.
+     */
+    [[nodiscard]] std::optional<std::uint64_t> next_visit() const noexcept {
+        std::optional<std::uint64_t> soonest{};
+        for (std::size_t level{}; level < Levels; ++level) {
+            const auto cursor{static_cast<std::size_t>((now_tick_ >> (level * slot_bits)) & slot_mask)};
+            const auto start{(cursor + 1) & slot_mask};
+            auto slot{first_occupied(level, start, SlotsPerLevel)};
+            if (slot == SlotsPerLevel) {
+                slot = first_occupied(level, 0, start);
+                if (slot == start) {
+                    continue;
+                }
+            }
+            const auto steps{((slot - cursor - 1) & slot_mask) + 1};
+            const auto unit{std::uint64_t{1} << (level * slot_bits)};
+            const auto visit{(now_tick_ & ~(unit - 1)) + (steps * unit)};
+            soonest = std::min(soonest.value_or(visit), visit);
+        }
+        return soonest;
+    }
+
+    /** @brief The first occupied slot at `level` in `[from, to)`, or `to` when there is none. */
+    [[nodiscard]] std::size_t first_occupied(const std::size_t level, std::size_t from, const std::size_t to) const noexcept {
+        const auto words{occupied_.subspan(level * words_per_level, words_per_level)};
+        while (from < to) {
+            if (const auto bits{words[from / 64] >> (from % 64)}; bits != 0) {
+                return std::min(to, from + static_cast<std::size_t>(std::countr_zero(bits)));
+            }
+            from = ((from / 64) + 1) * 64;
+        }
+        return to;
+    }
+
+    /** @brief Keep the occupancy bitmap in step with whether `slot`'s chain is empty. */
+    void mark(const std::size_t slot, const bool occupied) noexcept {
+        const auto within{slot % SlotsPerLevel};
+        auto& word{occupied_[((slot / SlotsPerLevel) * words_per_level) + (within / 64)]};
+        const auto bit{std::uint64_t{1} << (within % 64)};
+        word = occupied ? (word | bit) : (word & ~bit);
+    }
+
     void link(const std::uint32_t index, const std::size_t slot) noexcept {
         auto& head{heads_[slot]};
         entries_[index].prev = nil;
@@ -330,6 +392,7 @@ private:
         }
         head = index;
         entries_[index].slot = static_cast<std::uint32_t>(slot);
+        mark(slot, true);
     }
 
     void unlink(const std::uint32_t index) noexcept {
@@ -338,6 +401,9 @@ private:
             entries_[e.prev].next = e.next;
         } else {
             heads_[e.slot] = e.next;
+            if (e.next == nil) {
+                mark(e.slot, false);
+            }
         }
         if (e.next != nil) {
             entries_[e.next].prev = e.prev;
@@ -364,6 +430,7 @@ private:
         const auto index{static_cast<std::size_t>((now_tick_ >> (level * slot_bits)) & slot_mask)};
         auto current{head_at(level, index)};
         head_at(level, index) = nil;
+        mark((level * SlotsPerLevel) + index, false);
 
         while (current != nil) {
             const auto next{entries_[current].next};
@@ -399,6 +466,7 @@ private:
 
     std::span<entry> entries_{};
     std::span<std::uint32_t> heads_{};
+    std::span<std::uint64_t> occupied_{}; ///< one bit per slot, set while its chain is non-empty
     std::chrono::nanoseconds tick_{};
     departure epoch_{};
     std::uint64_t now_tick_{};

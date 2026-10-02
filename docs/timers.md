@@ -56,6 +56,14 @@ const auto now{dgram::now_on(dgram::txtime_clock::monotonic)};
 
 Drive it once per loop iteration, next to `receive`.
 
+**`advance` costs what the timers cost, not what the time costs.** A bitmap
+records which slots hold anything, and `advance` goes straight from one tick
+with work to the next, a few bitmap words per step. An idle wheel, a loop that
+stalled for minutes, or a `now` read from the wrong clock is reached in one
+jump instead of a walk over every tick in between. Jumping is safe because a
+slot's position is absolute: an entry sits at its deadline's digit, so every
+tick skipped only visits empty slots.
+
 ## Waiting on it
 
 A loop that blocks on a socket has to wake for whichever comes first, so it
@@ -109,8 +117,9 @@ Both are the same refuse-rather-than-degrade choice as `flow_table::insert` and
 ## Sizing
 
 `SlotsPerLevel` and `Levels` trade memory against range: slot heads cost
-`Levels * SlotsPerLevel * 4` bytes, so the defaults are 4 KB of heads regardless
-of `Capacity`. `Capacity` bounds how many timers can be armed at once, which for
+`Levels * SlotsPerLevel * 4` bytes and the occupancy bitmap one bit per slot, so
+the defaults are 4 KB of heads and 128 bytes of bitmap regardless of
+`Capacity`. `Capacity` bounds how many timers can be armed at once, which for
 most protocols is a small multiple of the connection count.
 
 A smaller `SlotsPerLevel` cascades more often but costs less memory; the tests

@@ -247,6 +247,111 @@ TEST(TimerWheel, MatchesANaiveReferenceUnderChurn) {
     }
 }
 
+/* advance jumps from one tick with work to the next. Long jumps cross many
+   cascade points at once, so drive it against the reference with steps up to
+   two full horizons, and check timers still come out oldest tick first. */
+TEST(TimerWheel, MatchesANaiveReferenceUnderLongJumps) {
+    fixture f{};
+    reference ref{};
+    std::mt19937 rng{20261002};
+
+    std::map<std::uint32_t, std::uint64_t> deadline_of{};
+    std::vector<std::pair<dgram::timer_handle, std::uint32_t>> live{};
+    std::uint32_t next_id{1};
+    std::uint64_t now{};
+
+    for (int round{}; round < 4000; ++round) {
+        const auto action{rng() % 10};
+
+        if (action < 5 && live.size() < capacity - 1) {
+            const auto delay{1 + (rng() % (wheel::horizon - 1))};
+            const auto id{next_id++};
+            const auto h{f.w.schedule(id, tick * static_cast<std::int64_t>(now + delay))};
+            ASSERT_TRUE(h.valid()) << "round " << round;
+            ref.schedule(id, now + delay);
+            deadline_of[id] = now + delay;
+            live.emplace_back(h, id);
+        } else if (action < 6 && !live.empty()) {
+            const auto pick{rng() % live.size()};
+            const auto [h, id]{live[pick]};
+            live.erase(live.begin() + static_cast<std::ptrdiff_t>(pick));
+            if (f.w.cancel(h)) {
+                ref.cancel(id);
+            }
+        } else {
+            now += (rng() % 2 == 0) ? 1 + (rng() % 6) : 1 + (rng() % (2 * wheel::horizon));
+            auto fired{fire_all(f.w, tick * static_cast<std::int64_t>(now))};
+            auto expected{ref.advance_to(now)};
+
+            ASSERT_TRUE(std::ranges::is_sorted(fired, {}, [&](const std::uint32_t id) { return deadline_of.at(id); })) << "round " << round;
+            std::ranges::sort(fired);
+            std::ranges::sort(expected);
+            ASSERT_EQ(fired, expected) << "round " << round << " at tick " << now;
+            EXPECT_EQ(f.w.current(), tick * static_cast<std::int64_t>(now));
+
+            std::erase_if(live, [&](const auto& p) { return std::ranges::find(expected, p.second) != expected.end(); });
+        }
+        ASSERT_EQ(f.w.size(), ref.size()) << "round " << round;
+    }
+}
+
+/* ============================================================================
+ * Cost follows the timers, not the time
+ * ============================================================================ */
+
+/* The default geometry at a microsecond tick: walking tick by tick, the cases
+   below take from seconds to centuries. Jumping, each is a handful of steps, so
+   the bound only has to separate those, under any sanitizer. */
+using fine_wheel = dgram::timer_wheel<std::uint32_t, 64>;
+constexpr auto fine_tick{1us};
+constexpr auto fast_enough{1s};
+
+TEST(TimerWheel, AnIdleWheelAdvancesAnyDistanceAtOnce) {
+    libmem::arena arena{fine_wheel::footprint()};
+    auto w{fine_wheel::carve(arena, fine_tick, 0ns)};
+    ASSERT_TRUE(w.has_value());
+
+    const auto far{fine_tick * (std::int64_t{1} << 40)}; // about 12 days
+    const auto started{std::chrono::steady_clock::now()};
+    EXPECT_EQ(w->advance(far), 0u);
+    EXPECT_LT(std::chrono::steady_clock::now() - started, fast_enough);
+    EXPECT_EQ(w->current(), far);
+}
+
+TEST(TimerWheel, ATimerAtTheHorizonFiresWithoutWalkingToIt) {
+    libmem::arena arena{fine_wheel::footprint()};
+    auto w{fine_wheel::carve(arena, fine_tick, 0ns)};
+    ASSERT_TRUE(w.has_value());
+
+    const auto due{w->max_delay()}; // 2^32 - 1 ticks, about 71 minutes
+    ASSERT_TRUE(w->schedule(7, due).valid());
+
+    const auto started{std::chrono::steady_clock::now()};
+    std::vector<std::uint32_t> fired{};
+    EXPECT_EQ(w->advance(due - fine_tick, [&](const std::uint32_t id) { fired.push_back(id); }), 0u) << "not yet";
+    EXPECT_EQ(w->advance(due, [&](const std::uint32_t id) { fired.push_back(id); }), 1u);
+    EXPECT_LT(std::chrono::steady_clock::now() - started, fast_enough);
+    EXPECT_EQ(fired, (std::vector<std::uint32_t>{7}));
+    EXPECT_TRUE(w->empty());
+}
+
+/* Advancing a monotonic-anchored wheel with a CLOCK_TAI reading lands decades
+   ahead. That is a caller bug, but it must not hang the loop. */
+TEST(TimerWheel, ANowDecadesAheadFiresEverythingAndReturns) {
+    libmem::arena arena{wheel::footprint()};
+    auto w{wheel::carve(arena, tick, 0ns)};
+    ASSERT_TRUE(w.has_value());
+    ASSERT_TRUE(w->schedule(1, 5ms).valid());
+    ASSERT_TRUE(w->schedule(2, 200ms).valid());
+
+    const auto started{std::chrono::steady_clock::now()};
+    std::vector<std::uint32_t> fired{};
+    EXPECT_EQ(w->advance(std::chrono::years{50}, [&](const std::uint32_t id) { fired.push_back(id); }), 2u);
+    EXPECT_LT(std::chrono::steady_clock::now() - started, fast_enough);
+    EXPECT_EQ(fired, (std::vector<std::uint32_t>{1, 2})) << "still oldest first";
+    EXPECT_TRUE(w->empty());
+}
+
 /* ============================================================================
  * Interaction with the loop
  * ============================================================================ */
